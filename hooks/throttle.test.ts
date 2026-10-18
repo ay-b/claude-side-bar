@@ -356,4 +356,6 @@ test('the mode row follows shift+tab and hook events', async ($, on) => {
   const autoOn = ((await ui2.find({ type: 'Text', text: /^ auto $/ }))?.props as { backgroundColor?: string }).backgroundColor
   await ui2.unmount()
   expect(autoOn).not.toBe(shades[3])
+  expect(shades.slice(0, 4)).toEqual(['#303030', '#444444', '#585858', '#6c6c6c'])
+  expect(shades[4]).toBe(autoOn)
 })

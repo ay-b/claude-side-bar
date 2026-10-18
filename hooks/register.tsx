@@ -103,15 +103,17 @@ const settle = (list: Task[], now: number): Task[] =>
     .filter(task => task.isLive || now - (task.endedAt ?? now) < ENDED_LINGER_MS)
 
 const MODE_HINT = '(shift+tab to cycle)'
-// Each mode's hue: bleached at rest, saturated while active.
-const MODES: [mode: string, word: string, label: RegExp, pale: string, vivid: string][] = [
-  ['default', 'manual', /\bmanual mode on\b/, '#f2a0a0', '#ff2a2a'],
-  ['acceptEdits', 'edits', /\baccept edits on\b/, '#f5b08a', '#ff8c00'],
-  ['plan', 'plan', /\bplan mode on\b/, '#f2e48c', '#ffd700'],
-  ['auto', 'auto', /\bauto mode on\b/, '#a0daa8', '#00d75f'],
-  ['bypassPermissions', 'bypass', /\bbypass permissions on\b/, '#eba0de', '#ff00d7'],
-  ['dontAsk', 'dontask', /\bdon't ask mode on\b/, '#a0c4f2', '#0087ff'],
+const MODES: [mode: string, word: string, label: RegExp][] = [
+  ['default', 'manual', /\bmanual mode on\b/],
+  ['acceptEdits', 'edits', /\baccept edits on\b/],
+  ['plan', 'plan', /\bplan mode on\b/],
+  ['auto', 'auto', /\bauto mode on\b/],
+  ['bypassPermissions', 'bypass', /\bbypass permissions on\b/],
+  ['dontAsk', 'dontask', /\bdon't ask mode on\b/],
 ]
+// Segments at rest step through a grey gradient left to right; the active one is green.
+const GREYS = ['#303030', '#444444', '#585858', '#6c6c6c', '#808080']
+const ACTIVE = '#00d75f'
 const ARROW = '\ue0b0'
 const CYCLE = new Set(['default', 'acceptEdits', 'plan', 'auto'])
 
@@ -618,16 +620,16 @@ export const register: Register = on => {
     }
 
     // Powerline segments: each arrow takes the left segment's shade over the right one's.
-    const segments = MODES.filter(([m]) => CYCLE.has(m) || m === activeMode).map(([m, word, , pale, vivid]) => ({
+    const segments = MODES.filter(([m]) => CYCLE.has(m) || m === activeMode).map(([m, word], i) => ({
       m,
       word,
       isOn: m === activeMode,
-      shade: m === activeMode ? vivid : pale,
+      shade: m === activeMode ? ACTIVE : (GREYS[i] ?? GREYS.at(-1)!),
     }))
     const modeRow = (
       <Text wrap="truncate-end">
         {segments.flatMap((seg, i) => [
-          <Text key={seg.m} bold={seg.isOn} color={seg.isOn ? 'black' : '#3a3a3a'} backgroundColor={seg.shade}>
+          <Text key={seg.m} bold={seg.isOn} color={seg.isOn ? 'black' : '#d0d0d0'} backgroundColor={seg.shade}>
             {` ${seg.word} `}
           </Text>,
           <Text key={`arrow:${seg.m}`} color={seg.shade} backgroundColor={segments[i + 1]?.shade}>
