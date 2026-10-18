@@ -339,6 +339,8 @@ function startPolling($: EngineInterface) {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    // Earlier versions pinned the mode here; a pinned status outlives a reload until cleared.
+    await $.ui.status(undefined)
     await $.command.register({
       name: 'monitor',
       description: 'Open the session-cost, agents and shells panel',

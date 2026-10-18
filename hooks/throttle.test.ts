@@ -268,3 +268,21 @@ test('an agent section names its type once, in the divider', async ($, on) => {
   expect(mentions.sort()).toEqual(['Agent:system-architect', `──Agent:system-architect${'─'.repeat(13)}`])
   await ui.unmount()
 })
+
+test('a load clears the status line earlier versions pinned', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  const statuses: (string | undefined)[] = []
+  on('ui.status', ($, e) => {
+    statuses.push(e.text)
+    return { value: undefined }
+  })
+  on('command.register', () => ({ value: { registered: true } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: false } }) as never)
+  on('agent.list', () => ({ value: [] }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [] } }))
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/tmp' } as never)
+  await clock.advance(3_000)
+  expect(statuses).toEqual([undefined])
+})
