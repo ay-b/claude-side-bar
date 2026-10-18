@@ -106,7 +106,7 @@ const MODE_HINT = '(shift+tab to cycle)'
 // Each mode's hue: bleached at rest, saturated while active.
 const MODES: [mode: string, word: string, label: RegExp, pale: string, vivid: string][] = [
   ['default', 'manual', /\bmanual mode on\b/, '#f2a0a0', '#ff2a2a'],
-  ['acceptEdits', 'edits', /\baccept edits on\b/, '#f5c48c', '#ff8c00'],
+  ['acceptEdits', 'edits', /\baccept edits on\b/, '#f5b08a', '#ff8c00'],
   ['plan', 'plan', /\bplan mode on\b/, '#f2e48c', '#ffd700'],
   ['auto', 'auto', /\bauto mode on\b/, '#a0daa8', '#00d75f'],
   ['bypassPermissions', 'bypass', /\bbypass permissions on\b/, '#eba0de', '#ff00d7'],
