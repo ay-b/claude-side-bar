@@ -1,0 +1,6 @@
+{
+  "name": "side-monitor",
+  "version": "0.1.0",
+  "description": "Side panel: this session's share of the weekly limit, plus live agent and shell status",
+  "types": "./types/index.d.ts"
+}
