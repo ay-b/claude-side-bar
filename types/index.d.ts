@@ -26,6 +26,7 @@ declare module 'claude-code' {
       agentMeta: Record<string, AgentMeta>
       context: ContextFill | null
       expanded: string | null
+      mode: string
     }
   }
 }

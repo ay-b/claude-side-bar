@@ -26,6 +26,7 @@ const shells = atom({ plugin: 'side-monitor', key: 'shells' } as const, [])
 const agentMeta = atom({ plugin: 'side-monitor', key: 'agentMeta' } as const, {})
 const context = atom({ plugin: 'side-monitor', key: 'context' } as const, null)
 const expanded = atom({ plugin: 'side-monitor', key: 'expanded' } as const, null)
+const mode = atom({ plugin: 'side-monitor', key: 'mode' } as const, 'default')
 
 const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g
 const ENDED_AGENT = new Set(['completed', 'failed', 'killed'])
@@ -102,6 +103,21 @@ const settle = (list: Task[], now: number): Task[] =>
     .filter(task => task.isLive || now - (task.endedAt ?? now) < ENDED_LINGER_MS)
 
 const MODE_HINT = '(shift+tab to cycle)'
+const MODES: [mode: string, word: string, label: RegExp][] = [
+  ['default', 'default', /$^/],
+  ['acceptEdits', 'edits', /^⏵⏵ accept edits on\b/],
+  ['plan', 'plan', /^⏸ plan mode on\b/],
+  ['auto', 'auto', /^⏵⏵ auto mode on\b/],
+  ['bypassPermissions', 'bypass', /^⏵⏵ bypass permissions on\b/],
+  ['dontAsk', 'dontask', /^⏵⏵ don't ask mode on\b/],
+]
+const CYCLE = new Set(['default', 'acceptEdits', 'plan', 'auto'])
+
+/** The permission mode the footer names; the footer names none in default mode. */
+export const modeOf = (hint: string): string =>
+  MODES.find(([, , label]) => hint.split(' · ').some(part => label.test(part)))?.[0] ?? 'default'
+
+let lastMode: string | undefined
 
 /** The footer hint without the agent count and the mode's cycle hint. */
 export const footerHint = (hint: string): string => {
@@ -399,6 +415,12 @@ export const register: Register = on => {
 
   // Agents live in the panel, so the footer drops their count; the mode stays, without its cycle hint.
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    // The footer redraws on every mode change, shift+tab included; state is written outside the draw.
+    const now = modeOf(e.props.hint)
+    if (now !== lastMode) {
+      lastMode = now
+      $.clock.after(0, () => void update($, mode, () => now))
+    }
     const hint = footerHint(e.props.hint)
     return hint === e.props.hint ? next(e) : next({ ...e, props: { ...e.props, hint } })
   })
@@ -470,6 +492,7 @@ export const register: Register = on => {
     const metaById = await read($, agentMeta)
     const fill = await read($, context)
     const openId = await read($, expanded)
+    const activeMode = await read($, mode)
     const now = await $.clock.now()
 
     const cells = (percent: number, of = width) => Math.round((Math.min(100, Math.max(0, percent)) / 100) * of)
@@ -582,10 +605,24 @@ export const register: Register = on => {
       )
     }
 
+    const modeRow = (
+      <Text wrap="truncate-end">
+        {MODES.filter(([m]) => CYCLE.has(m) || m === activeMode).flatMap(([m, word], i) => [
+          i > 0 ? <Text key={`gap:${m}`}> </Text> : null,
+          m === activeMode ? (
+            <Text key={m} bold color="black" backgroundColor="cyan">{` ${word} `}</Text>
+          ) : (
+            <Text key={m} dimColor>{` ${word} `}</Text>
+          ),
+        ])}
+      </Text>
+    )
+
     if (open) return <Box flexDirection="column">{taskSection(open.kind, open.task, true)}</Box>
 
     return (
       <Box flexDirection="column">
+        {modeRow}
         <Text bold>Session cost</Text>
         {weekSection()}
         {contextSection()}
