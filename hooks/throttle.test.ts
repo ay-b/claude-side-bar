@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { footerHint, heatColors, overlay, shellStatus, shortPercent, shortTokens, tailOf } from './register'
+import { footerHint, heatColors, modeOf, overlay, shellStatus, shortPercent, shortTokens, tailOf } from './register'
 
 const measure = (percentUsed: number) => ({
   context: { window: 200_000 },
@@ -287,12 +287,21 @@ test('a load clears the status line earlier versions pinned', async ($, on) => {
   expect(statuses).toEqual([undefined])
 })
 
-test('the mode row highlights the mode hook events report, and none in default mode', async ($, on) => {
+test('the footer names the mode only in the render right after shift+tab', async () => {
+  expect(modeOf('auto mode on (shift+tab to cycle) · ← 1 agent')).toBe('auto')
+  expect(modeOf('manual mode on · ? for shortcuts · ← 1 agent')).toBe('default')
+  expect(modeOf('accept edits on (shift+tab to cycle) · ← 1 agent')).toBe('acceptEdits')
+  expect(modeOf('plan mode on (shift+tab to cycle) · ← 1 agent')).toBe('plan')
+  expect(modeOf('(shift+tab to cycle) · ← 1 agent')).toBeUndefined()
+  expect(modeOf('? for shortcuts · ← 1 agent')).toBeUndefined()
+})
+
+test('the mode row follows shift+tab and hook events', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   mock.store(on)
   const highlighted = async () => {
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    const words = await ui.findAll({ type: 'Text', text: /^ (default|edits|plan|auto|bypass|dontask) $/ })
+    const words = await ui.findAll({ type: 'Text', text: /^ (manual|edits|plan|auto|bypass|dontask) $/ })
     await ui.unmount()
     const lit = words.filter(word => (word.props as { backgroundColor?: string }).backgroundColor === 'cyan')
     return { all: words.map(word => word.text.trim()), on: lit.map(word => word.text.trim()) }
@@ -311,16 +320,21 @@ test('the mode row highlights the mode hook events report, and none in default m
     await ui.unmount()
     await clock.advance(1)
   }
+  // shift+tab: the named render, then the unnamed one a millisecond later, as the engine sends them.
+  const shiftTab = async (named: string) => {
+    await footer(named)
+    await footer('(shift+tab to cycle) · ← 1 agent')
+  }
 
-  expect(await highlighted()).toEqual({ all: ['edits', 'plan', 'auto'], on: [] })
-  await prompt('auto')
-  expect(await highlighted()).toEqual({ all: ['edits', 'plan', 'auto'], on: ['auto'] })
-  await footer('? for shortcuts')
-  expect((await highlighted()).on).toEqual([])
-  await footer('(shift+tab to cycle) · ← 1 agent')
+  expect(await highlighted()).toEqual({ all: ['manual', 'edits', 'plan', 'auto'], on: ['manual'] })
+  await shiftTab('accept edits on (shift+tab to cycle) · ← 1 agent')
+  expect((await highlighted()).on).toEqual(['edits'])
+  await shiftTab('plan mode on (shift+tab to cycle) · ← 1 agent')
+  expect((await highlighted()).on).toEqual(['plan'])
+  await shiftTab('auto mode on (shift+tab to cycle) · ← 1 agent')
   expect((await highlighted()).on).toEqual(['auto'])
+  await shiftTab('manual mode on · ? for shortcuts · ← 1 agent')
+  expect((await highlighted()).on).toEqual(['manual'])
   await prompt('bypassPermissions')
-  expect(await highlighted()).toEqual({ all: ['edits', 'plan', 'auto', 'bypass'], on: ['bypass'] })
-  await prompt('default')
-  expect((await highlighted()).on).toEqual([])
+  expect(await highlighted()).toEqual({ all: ['manual', 'edits', 'plan', 'auto', 'bypass'], on: ['bypass'] })
 })
