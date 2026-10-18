@@ -103,21 +103,24 @@ const settle = (list: Task[], now: number): Task[] =>
     .filter(task => task.isLive || now - (task.endedAt ?? now) < ENDED_LINGER_MS)
 
 const MODE_HINT = '(shift+tab to cycle)'
-const MODES: [mode: string, word: string, label: RegExp][] = [
-  ['default', 'default', /$^/],
-  ['acceptEdits', 'edits', /^⏵⏵ accept edits on\b/],
-  ['plan', 'plan', /^⏸ plan mode on\b/],
-  ['auto', 'auto', /^⏵⏵ auto mode on\b/],
-  ['bypassPermissions', 'bypass', /^⏵⏵ bypass permissions on\b/],
-  ['dontAsk', 'dontask', /^⏵⏵ don't ask mode on\b/],
+// Default mode is not listed: the row highlights none then.
+const MODES: [mode: string, word: string][] = [
+  ['acceptEdits', 'edits'],
+  ['plan', 'plan'],
+  ['auto', 'auto'],
+  ['bypassPermissions', 'bypass'],
+  ['dontAsk', 'dontask'],
 ]
-const CYCLE = new Set(['default', 'acceptEdits', 'plan', 'auto'])
+const CYCLE = new Set(['acceptEdits', 'plan', 'auto'])
 
-/** The permission mode the footer names; the footer names none in default mode. */
-export const modeOf = (hint: string): string =>
-  MODES.find(([, , label]) => hint.split(' · ').some(part => label.test(part)))?.[0] ?? 'default'
+// The footer's hint carries the cycle hint in every mode but default, and never the mode's name.
+let isDefault: boolean | undefined
+// The last non-default mode a classic hook event reported.
+let lastNamed: string | undefined
 
-let lastMode: string | undefined
+async function setMode($: EngineInterface, next: string) {
+  if ((await read($, mode)) !== next) await update($, mode, () => next)
+}
 
 /** The footer hint without the agent count and the mode's cycle hint. */
 export const footerHint = (hint: string): string => {
@@ -416,13 +419,22 @@ export const register: Register = on => {
   // Agents live in the panel, so the footer drops their count; the mode stays, without its cycle hint.
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
     // The footer redraws on every mode change, shift+tab included; state is written outside the draw.
-    const now = modeOf(e.props.hint)
-    if (now !== lastMode) {
-      lastMode = now
-      $.clock.after(0, () => void update($, mode, () => now))
+    const nowDefault = !e.props.hint.includes(MODE_HINT)
+    if (nowDefault !== isDefault) {
+      isDefault = nowDefault
+      $.clock.after(0, () => void setMode($, nowDefault ? 'default' : (lastNamed ?? 'default')))
     }
     const hint = footerHint(e.props.hint)
     return hint === e.props.hint ? next(e) : next({ ...e, props: { ...e.props, hint } })
+  })
+
+  // Only the classic hook events name the mode; none fires on shift+tab itself.
+  on('classic.*', async ($, e, next) => {
+    if ('permission_mode' in e && typeof e.permission_mode === 'string') {
+      if (e.permission_mode !== 'default') lastNamed = e.permission_mode
+      await setMode($, e.permission_mode)
+    }
+    return next(e)
   })
 
   on('tool.call', { tool: 'Agent' }, async ($, e, next) => {

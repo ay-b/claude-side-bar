@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { footerHint, heatColors, modeOf, overlay, shellStatus, shortPercent, shortTokens, tailOf } from './register'
+import { footerHint, heatColors, overlay, shellStatus, shortPercent, shortTokens, tailOf } from './register'
 
 const measure = (percentUsed: number) => ({
   context: { window: 200_000 },
@@ -287,23 +287,19 @@ test('a load clears the status line earlier versions pinned', async ($, on) => {
   expect(statuses).toEqual([undefined])
 })
 
-test('the footer names the mode, and default when it names none', async () => {
-  expect(modeOf('⏵⏵ auto mode on · esc to interrupt')).toBe('auto')
-  expect(modeOf('⏸ plan mode on (shift+tab to cycle)')).toBe('plan')
-  expect(modeOf('⏵⏵ accept edits on · ? for shortcuts')).toBe('acceptEdits')
-  expect(modeOf('? for shortcuts')).toBe('default')
-})
-
-test('the mode row highlights the mode the footer names', async ($, on) => {
+test('the mode row highlights the mode hook events report, and none in default mode', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   mock.store(on)
   const highlighted = async () => {
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
     const words = await ui.findAll({ type: 'Text', text: /^ (default|edits|plan|auto|bypass|dontask) $/ })
     await ui.unmount()
-    const on = words.filter(word => (word.props as { backgroundColor?: string }).backgroundColor === 'cyan')
-    return { all: words.map(word => word.text.trim()), on: on.map(word => word.text.trim()) }
+    const lit = words.filter(word => (word.props as { backgroundColor?: string }).backgroundColor === 'cyan')
+    return { all: words.map(word => word.text.trim()), on: lit.map(word => word.text.trim()) }
   }
+  on('classic.UserPromptSubmit', () => ({}))
+  const prompt = (permission_mode: string) =>
+    $.classic.UserPromptSubmit({ prompt: 'hi', permission_mode } as never)
   on('ui.render', { component: 'PromptHint' }, ($, e) => ({ type: 'Text', props: {}, children: [e.props.hint] }) as never)
   const footer = async (hint: string) => {
     const ui = await $.ui.mount({
@@ -316,11 +312,15 @@ test('the mode row highlights the mode the footer names', async ($, on) => {
     await clock.advance(1)
   }
 
-  expect(await highlighted()).toEqual({ all: ['default', 'edits', 'plan', 'auto'], on: ['default'] })
-  await footer('⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt')
-  expect((await highlighted()).on).toEqual(['auto'])
+  expect(await highlighted()).toEqual({ all: ['edits', 'plan', 'auto'], on: [] })
+  await prompt('auto')
+  expect(await highlighted()).toEqual({ all: ['edits', 'plan', 'auto'], on: ['auto'] })
   await footer('? for shortcuts')
-  expect((await highlighted()).on).toEqual(['default'])
-  await footer('⏵⏵ bypass permissions on (shift+tab to cycle)')
-  expect(await highlighted()).toEqual({ all: ['default', 'edits', 'plan', 'auto', 'bypass'], on: ['bypass'] })
+  expect((await highlighted()).on).toEqual([])
+  await footer('(shift+tab to cycle) · ← 1 agent')
+  expect((await highlighted()).on).toEqual(['auto'])
+  await prompt('bypassPermissions')
+  expect(await highlighted()).toEqual({ all: ['edits', 'plan', 'auto', 'bypass'], on: ['bypass'] })
+  await prompt('default')
+  expect((await highlighted()).on).toEqual([])
 })
