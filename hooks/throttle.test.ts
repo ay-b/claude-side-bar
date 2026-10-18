@@ -237,7 +237,7 @@ test('Cmpct now is a rounded button one lift above the bar beneath it, reddish o
   expect(heat[39]).toBe('#ff0000')
 })
 
-test('[v] expands a shell section to the pane height and [^] collapses it', async ($, on) => {
+test('the chevron pill expands a shell section to the pane height and collapses it', async ($, on) => {
   mock.clock(on, { now: 1_000_000 })
   mock.store(on)
   const lines = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join('\n')
@@ -247,10 +247,15 @@ test('[v] expands a shell section to the pane height and [^] collapses it', asyn
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /^line 59$/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /Session cost/ })).toBeDefined()
-  const divider = await ui.find({ type: 'Text', text: /^──Shell─+$/ })
-  expect(divider?.text).toHaveLength(37)
-  const title = divider?.children[1] as { props?: { bold?: boolean } } | undefined
-  expect(title?.props?.bold).toBe(true)
+  const divider = await ui.find({ type: 'Text', text: /^─\ue0d7 Shell \ue0b0─+$/ })
+  expect(divider?.text).toHaveLength(35)
+  const pill = await ui.find({ type: 'Button', key: 'expand:fg:a' })
+  expect(pill?.text).toBe('  ')
+  const [, tail, title, arrow] = (divider?.children ?? []) as { props?: Record<string, unknown> }[]
+  expect(title?.props).toMatchObject({ bold: true, backgroundColor: '#444444' })
+  expect(tail?.props).toMatchObject({ color: '#444444' })
+  expect(arrow?.props).toMatchObject({ color: '#444444' })
+  expect(arrow?.props?.backgroundColor).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /Shell · build/ })).toBeUndefined()
 
   await ui.press({ key: 'expand:fg:a' })
@@ -259,7 +264,7 @@ test('[v] expands a shell section to the pane height and [^] collapses it', asyn
   expect(shown.at(-1)?.text).toBe('line 60')
   expect(shown[0]?.text).toBe('line 33')
   expect(await ui.find({ type: 'Text', text: /Session cost/ })).toBeUndefined()
-  expect(await ui.find({ type: 'Button', text: '[^]' })).toBeDefined()
+  expect((await ui.find({ type: 'Button', key: 'expand:fg:a' }))?.text).toBe('  ')
 
   await ui.press({ key: 'expand:fg:a' })
   expect(await ui.find({ type: 'Text', text: /^line 59$/ })).toBeUndefined()
@@ -281,10 +286,10 @@ test('an agent section names its type once, in the divider', async ($, on) => {
   await clock.advance(3_000)
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /^──Agent:system-architect─+$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^─\ue0d7 Agent:system-architect \ue0b0─+$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^\[running\] Design invitations$/ })).toBeDefined()
   const mentions = (await ui.findAll({ type: 'Text', text: /system-architect/ })).map(found => found.text)
-  expect(mentions.sort()).toEqual(['Agent:system-architect', `──Agent:system-architect${'─'.repeat(13)}`])
+  expect(mentions.sort()).toEqual([' Agent:system-architect ', `─\ue0d7 Agent:system-architect \ue0b0${'─'.repeat(8)}`])
   await ui.unmount()
 })
 

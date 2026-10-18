@@ -18,6 +18,9 @@ const HEAT_STOPS = [[0x90, 0xe0, 0x90], [0xff, 0xa5, 0x00], [0xff, 0x00, 0x00]]
 const COMPACT_LABEL = 'Cmpct now'
 // The button stands out from the bar beneath it by this much per channel, filled or not.
 const BUTTON_LIFT = 0x1a
+// Nerd Font chevrons: nf-fa-chevron_down expands a section, nf-fa-chevron_up collapses it.
+const EXPAND_GLYPH = ''
+const COLLAPSE_GLYPH = ''
 const COMPACT_RETRY_MS = 2_000
 const COMPACT_TRIES = 5
 
@@ -139,6 +142,10 @@ const MODES: [mode: string, word: string, label: RegExp][] = [
 const GREYS = ['#303030', '#444444', '#585858', '#6c6c6c', '#808080']
 const ACTIVE = '#00d75f'
 const ARROW = '\ue0b0'
+// nf-ple-right_hard_divider_inverse: a block notched by an arrow tip, the tail end of a segment.
+const ARROW_TAIL = '\ue0d7'
+// Section titles wear the shade the "edits" segment has when inactive.
+const TITLE_SHADE = GREYS[1]!
 const CYCLE = new Set(['default', 'acceptEdits', 'plan', 'auto'])
 
 // shift+tab's order; a mode missing here has an unknown successor, and a hook event corrects it.
@@ -635,18 +642,26 @@ export const register: Register = on => {
       const room = Math.max(1, e.props.scroll.bodyRows - 2 - (meta ? 1 : 0))
       const output = isOpen ? (task.lines || task.tail || ' ').split('\n').slice(-room) : [task.tail || ' ']
       const toggle = () => update($, expanded, () => (isOpen ? null : task.id))
-      const label = isOpen ? '[^]' : '[v]'
-      const across = width - label.length
-      const name = (task.type ? `${kind}:${task.type}` : kind).slice(0, Math.max(0, across - 2))
+      const label = ` ${isOpen ? COLLAPSE_GLYPH : EXPAND_GLYPH} `
+      const across = width - label.length - 2
+      const name = (task.type ? `${kind}:${task.type}` : kind).slice(0, Math.max(0, across - 5))
       return (
         <Box flexDirection="column" key={`${kind}:${task.id}`}>
           <Box flexDirection="row">
             <Text>
-              <Text dimColor>──</Text>
-              <Text bold>{name}</Text>
-              <Text dimColor>{'─'.repeat(Math.max(0, across - 2 - name.length))}</Text>
+              <Text dimColor>─</Text>
+              <Text color={TITLE_SHADE}>{ARROW_TAIL}</Text>
+              <Text bold color="#d0d0d0" backgroundColor={TITLE_SHADE}>{` ${name} `}</Text>
+              <Text color={TITLE_SHADE}>{ARROW}</Text>
+              <Text dimColor>{'─'.repeat(Math.max(0, across - 5 - name.length))}</Text>
             </Text>
-            <Button key={`expand:${task.id}`} label={label} plain dimColor onPress={toggle} />
+            <Button key={`expand:${task.id}`} label={isOpen ? 'Collapse' : 'Expand'} plain onPress={toggle}>
+              <Text color={lift(TRACK)}>{''}</Text>
+              <Text bold backgroundColor={lift(TRACK)}>
+                {label}
+              </Text>
+              <Text color={lift(TRACK)}>{''}</Text>
+            </Button>
           </Box>
           <Text wrap="truncate-end">
             <Text color={statusColor(task)}>[{task.status}]</Text> <Text bold>{task.title}</Text>
