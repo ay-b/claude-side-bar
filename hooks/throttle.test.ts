@@ -106,14 +106,19 @@ test('labels shorten and lie over the bar cells', async () => {
   ])
 })
 
-test('context cells turn redder past 400k and pure red from 75%', async () => {
-  const colors = heatColors(18, 20, 1_000_000)
-  expect(colors.slice(0, 8).every(c => c === 'cyan')).toBe(true)
-  const reds = colors.slice(8, 14)
-  const green = (c: string) => parseInt(c.slice(3, 5), 16)
-  for (let i = 1; i < reds.length; i++) expect(green(reds[i]!)).toBeLessThan(green(reds[i - 1]!))
-  expect(colors.slice(14)).toEqual(['#ff0000', '#ff0000', '#ff0000', '#ff0000'])
-  expect(heatColors(20, 20, 200_000).slice(13, 16)).toEqual(['cyan', '#ff0000', '#ff0000'])
+test('context cells run light green to orange to red from the first cell, pure red from 75%', async () => {
+  const colors = heatColors(20, 20, 1_000_000)
+  const rgb = (c: string) => [1, 3, 5].map(n => parseInt(c.slice(n, n + 2), 16))
+  // Cell 1 sits 1/15 of the way to red, so it is mostly the light green stop.
+  expect(rgb(colors[0]!)).toEqual([159, 216, 125])
+  expect(rgb(heatColors(20, 40, 400_000)[14]!)).toEqual([0xff, 0xa5, 0x00])
+  for (let i = 1; i < 15; i++) {
+    const [r0, g0] = rgb(colors[i - 1]!)
+    const [r1, g1] = rgb(colors[i]!)
+    expect(r1).toBeGreaterThanOrEqual(r0!)
+    if (i > 7) expect(g1).toBeLessThan(g0!)
+  }
+  expect(colors.slice(14)).toEqual(Array(6).fill('#ff0000'))
 })
 
 const usageAt = (percent: number) => ({
@@ -224,11 +229,12 @@ test('Cmpct now is a rounded button one lift above the bar beneath it, reddish o
 
   await $.session.measure({ ...usageAt(99), changed: ['context'] })
   const full = await button()
-  const under = full.left?.props?.backgroundColor ?? ''
-  expect(/^#ff([0-9a-f]{2})\1$/.test(under)).toBe(true)
-  expect(full.left?.props?.color).toBe(lift(under))
-  for (const c of full.inner) expect(/^#ff([0-9a-f]{2})\1$/.test(c.props?.backgroundColor ?? '')).toBe(true)
-  expect(full.inner.every(c => c.props?.backgroundColor !== '#4a4a4a')).toBe(true)
+  // The pane is 40 cells wide: the button covers cells 27 to 39, all filled at 99%.
+  const heat = heatColors(40, 40, 1_000_000)
+  expect(full.left?.props).toMatchObject({ color: lift(heat[27]!), backgroundColor: heat[27] })
+  expect(full.inner.map(c => c.props?.backgroundColor)).toEqual(heat.slice(28, 39).map(lift))
+  expect(full.right?.props).toMatchObject({ color: lift(heat[39]!), backgroundColor: heat[39] })
+  expect(heat[39]).toBe('#ff0000')
 })
 
 test('[v] expands a shell section to the pane height and [^] collapses it', async ($, on) => {

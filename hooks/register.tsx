@@ -11,13 +11,11 @@ const TAIL_LINES = 1
 const EXPANDED_LINES = 300
 const TRACK = '#303030'
 const COMPACT_AT_PERCENT = 85
-const HEAT_FROM_TOKENS = 400_000
 const HEAT_FULL_PERCENT = 75
-const COOL = 'cyan'
+const HEAT_STOPS = [[0x90, 0xe0, 0x90], [0xff, 0xa5, 0x00], [0xff, 0x00, 0x00]]
 const COMPACT_LABEL = 'Cmpct now'
 // The button stands out from the bar beneath it by this much per channel, filled or not.
 const BUTTON_LIFT = 0x1a
-const NAMED: Record<string, string> = { cyan: '#00cdcd' }
 const COMPACT_RETRY_MS = 2_000
 const COMPACT_TRIES = 5
 
@@ -79,23 +77,21 @@ export const overlay = (label: string, width: number, fills: { cells: number; co
   return runs
 }
 
-/** Colors each filled cell: cool up to 400k tokens, then redder per cell, pure red from 75%. */
+/** Colors each filled cell along light green, orange, red from the first cell; pure red from 75%. */
 export const heatColors = (filled: number, width: number, window: number): string[] => {
   const full = (HEAT_FULL_PERCENT / 100) * window
   return Array.from({ length: filled }, (_, i) => {
-    const at = ((i + 1) / width) * window
-    if (at >= full) return '#ff0000'
-    if (at <= HEAT_FROM_TOKENS) return COOL
-    const hex = Math.round(200 * (1 - (at - HEAT_FROM_TOKENS) / (full - HEAT_FROM_TOKENS)))
-      .toString(16)
-      .padStart(2, '0')
-    return `#ff${hex}${hex}`
+    const t = Math.min(1, (((i + 1) / width) * window) / full) * (HEAT_STOPS.length - 1)
+    const from = HEAT_STOPS[Math.min(Math.floor(t), HEAT_STOPS.length - 2)]!
+    const to = HEAT_STOPS[Math.min(Math.floor(t), HEAT_STOPS.length - 2) + 1]!
+    const k = t - Math.min(Math.floor(t), HEAT_STOPS.length - 2)
+    return `#${from.map((c, n) => Math.round(c + (to[n]! - c) * k).toString(16).padStart(2, '0')).join('')}`
   })
 }
 
 /** Lightens a bar color by BUTTON_LIFT per channel. */
 export const lift = (color: string): string => {
-  const hex = (NAMED[color] ?? color).replace('#', '')
+  const hex = color.replace('#', '')
   return `#${[0, 2, 4]
     .map(i => Math.min(255, parseInt(hex.slice(i, i + 2), 16) + BUTTON_LIFT).toString(16).padStart(2, '0'))
     .join('')}`
