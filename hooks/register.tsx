@@ -103,14 +103,14 @@ const settle = (list: Task[], now: number): Task[] =>
     .filter(task => task.isLive || now - (task.endedAt ?? now) < ENDED_LINGER_MS)
 
 const MODE_HINT = '(shift+tab to cycle)'
-// Each mode's hue: a dark shade at rest, the bright one while active.
-const MODES: [mode: string, word: string, label: RegExp, dark: string, bright: string][] = [
-  ['default', 'manual', /\bmanual mode on\b/, '#7a1f1f', '#ff5f5f'],
-  ['acceptEdits', 'edits', /\baccept edits on\b/, '#8a4a10', '#ffa040'],
-  ['plan', 'plan', /\bplan mode on\b/, '#7a7010', '#ffe14d'],
-  ['auto', 'auto', /\bauto mode on\b/, '#1f6a2a', '#5fd75f'],
-  ['bypassPermissions', 'bypass', /\bbypass permissions on\b/, '#6a1f5a', '#ff5fd7'],
-  ['dontAsk', 'dontask', /\bdon't ask mode on\b/, '#1d3a6a', '#5fafff'],
+// Each mode's hue: bleached at rest, saturated while active.
+const MODES: [mode: string, word: string, label: RegExp, pale: string, vivid: string][] = [
+  ['default', 'manual', /\bmanual mode on\b/, '#b58c8c', '#ff2a2a'],
+  ['acceptEdits', 'edits', /\baccept edits on\b/, '#b89e85', '#ff8c00'],
+  ['plan', 'plan', /\bplan mode on\b/, '#b3ae85', '#ffd700'],
+  ['auto', 'auto', /\bauto mode on\b/, '#8cad91', '#00d75f'],
+  ['bypassPermissions', 'bypass', /\bbypass permissions on\b/, '#ad8ca8', '#ff00d7'],
+  ['dontAsk', 'dontask', /\bdon't ask mode on\b/, '#8c9cb3', '#0087ff'],
 ]
 const ARROW = '\ue0b0'
 const CYCLE = new Set(['default', 'acceptEdits', 'plan', 'auto'])
@@ -618,16 +618,16 @@ export const register: Register = on => {
     }
 
     // Powerline segments: each arrow takes the left segment's shade over the right one's.
-    const segments = MODES.filter(([m]) => CYCLE.has(m) || m === activeMode).map(([m, word, , dark, bright]) => ({
+    const segments = MODES.filter(([m]) => CYCLE.has(m) || m === activeMode).map(([m, word, , pale, vivid]) => ({
       m,
       word,
       isOn: m === activeMode,
-      shade: m === activeMode ? bright : dark,
+      shade: m === activeMode ? vivid : pale,
     }))
     const modeRow = (
       <Text wrap="truncate-end">
         {segments.flatMap((seg, i) => [
-          <Text key={seg.m} bold={seg.isOn} color={seg.isOn ? 'black' : '#bcbcbc'} backgroundColor={seg.shade}>
+          <Text key={seg.m} bold={seg.isOn} color={seg.isOn ? 'black' : '#3a3a3a'} backgroundColor={seg.shade}>
             {` ${seg.word} `}
           </Text>,
           <Text key={`arrow:${seg.m}`} color={seg.shade} backgroundColor={segments[i + 1]?.shade}>
