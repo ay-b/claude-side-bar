@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { footerHint, heatColors, modeOf, overlay, shellStatus, shortPercent, shortTokens, tailOf } from './register'
+import { footerHint, heatColors, lift, modeOf, overlay, shellStatus, shortPercent, shortTokens, tailOf } from './register'
 
 const measure = (percentUsed: number) => ({
   context: { window: 200_000 },
@@ -199,23 +199,36 @@ test('Cmpct now sits on the context row and compacts when pressed', async ($, on
   expect(compacted).toBe(1)
 })
 
-test('the bar fills under Cmpct now: a red shade at 90%, track at 50%', async ($, on) => {
+test('Cmpct now is a rounded button one lift above the bar beneath it, reddish once filled', async ($, on) => {
   mock.clock(on, { now: 1_000_000 })
   mock.store(on)
   on('session.measure', ($, e) => ({ changed: e.changed }))
-  const buttonBackground = async () => {
+  type Cell = { children?: unknown[]; props?: { color?: string; backgroundColor?: string } }
+  const button = async () => {
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    const button = await ui.find({ key: 'compact' })
+    const found = await ui.find({ key: 'compact' })
     await ui.unmount()
-    const first = button?.children[0] as { props?: { backgroundColor?: string } } | undefined
-    return first?.props?.backgroundColor
+    const cells = (found?.children ?? []) as Cell[]
+    return { left: cells[0], inner: cells.slice(1, -1), right: cells.at(-1) }
   }
 
-  await $.session.measure({ ...usageAt(90), changed: ['context'] })
-  expect(/^#ff([0-9a-f]{2})\1$/.test((await buttonBackground()) ?? '')).toBe(true)
+  expect(lift('#303030')).toBe('#4a4a4a')
+  expect(lift('#ff0000')).toBe('#ff1a1a')
 
   await $.session.measure({ ...usageAt(50), changed: ['context'] })
-  expect(await buttonBackground()).toBe('#303030')
+  const empty = await button()
+  expect(empty.left?.children).toEqual(['\ue0b6'])
+  expect(empty.right?.children).toEqual(['\ue0b4'])
+  expect(empty.left?.props).toMatchObject({ color: '#4a4a4a', backgroundColor: '#303030' })
+  expect(empty.inner.map(c => c.props?.backgroundColor)).toEqual(Array(11).fill('#4a4a4a'))
+
+  await $.session.measure({ ...usageAt(99), changed: ['context'] })
+  const full = await button()
+  const under = full.left?.props?.backgroundColor ?? ''
+  expect(/^#ff([0-9a-f]{2})\1$/.test(under)).toBe(true)
+  expect(full.left?.props?.color).toBe(lift(under))
+  for (const c of full.inner) expect(/^#ff([0-9a-f]{2})\1$/.test(c.props?.backgroundColor ?? '')).toBe(true)
+  expect(full.inner.every(c => c.props?.backgroundColor !== '#4a4a4a')).toBe(true)
 })
 
 test('[v] expands a shell section to the pane height and [^] collapses it', async ($, on) => {

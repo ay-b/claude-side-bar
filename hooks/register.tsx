@@ -15,6 +15,9 @@ const HEAT_FROM_TOKENS = 400_000
 const HEAT_FULL_PERCENT = 75
 const COOL = 'cyan'
 const COMPACT_LABEL = 'Cmpct now'
+// The button stands out from the bar beneath it by this much per channel, filled or not.
+const BUTTON_LIFT = 0x1a
+const NAMED: Record<string, string> = { cyan: '#00cdcd' }
 const COMPACT_RETRY_MS = 2_000
 const COMPACT_TRIES = 5
 
@@ -88,6 +91,14 @@ export const heatColors = (filled: number, width: number, window: number): strin
       .padStart(2, '0')
     return `#ff${hex}${hex}`
   })
+}
+
+/** Lightens a bar color by BUTTON_LIFT per channel. */
+export const lift = (color: string): string => {
+  const hex = (NAMED[color] ?? color).replace('#', '')
+  return `#${[0, 2, 4]
+    .map(i => Math.min(255, parseInt(hex.slice(i, i + 2), 16) + BUTTON_LIFT).toString(16).padStart(2, '0'))
+    .join('')}`
 }
 
 const contextOf = (usage: SessionContextUsage): ContextFill => ({
@@ -532,10 +543,17 @@ export const register: Register = on => {
       if (!fill || fill.percent === undefined) {
         return <Text dimColor>No context reading yet.</Text>
       }
-      // The bar runs under the Button too: its last cells, brackets included, are the Button's own.
-      const button = `[ ${COMPACT_LABEL} ]`
-      const barWidth = Math.max(4, width - button.length)
+      // The bar runs under the Button too: each of its cells is the bar's color there, lifted.
+      const label = ` ${COMPACT_LABEL} `
+      const buttonWidth = label.length + 2
+      const barWidth = Math.max(4, width - buttonWidth)
       const fills = heatColors(cells(fill.percent), width, fill.window).map(color => ({ cells: 1, color }))
+      const under = (i: number) => fills[barWidth + i]?.color ?? TRACK
+      const cap = (i: number, glyph: string) => (
+        <Text key={`cap:${i}`} color={lift(under(i))} backgroundColor={under(i)}>
+          {glyph}
+        </Text>
+      )
       const tokens = fill.tokens !== undefined ? ` ${shortTokens(fill.tokens)}/${shortTokens(fill.window)}` : ''
       const onCompact = async () => {
         if (!(await compactNow($))) await $.ui.toast('A turn is running: press Cmpct now after it ends')
@@ -544,7 +562,18 @@ export const register: Register = on => {
         <Box flexDirection="row">
           {barLine(`Context: ${Math.round(fill.percent)}%${tokens}`, fills.slice(0, barWidth), barWidth)}
           <Button key="compact" label={COMPACT_LABEL} plain onPress={onCompact}>
-            {barRuns(button, fills.slice(barWidth), button.length, true)}
+            {cap(0, '\ue0b6')}
+            {[...label].map((char, i) => (
+              <Text
+                key={String(i)}
+                bold
+                color={under(i + 1) === TRACK ? undefined : 'black'}
+                backgroundColor={lift(under(i + 1))}
+              >
+                {char}
+              </Text>
+            ))}
+            {cap(buttonWidth - 1, '\ue0b4')}
           </Button>
         </Box>
       )
