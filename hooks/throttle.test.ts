@@ -304,7 +304,7 @@ test('the mode row follows shift+tab and hook events', async ($, on) => {
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
     const words = await ui.findAll({ type: 'Text', text: /^ (manual|edits|plan|auto|bypass|dontask) $/ })
     await ui.unmount()
-    const lit = words.filter(word => (word.props as { backgroundColor?: string }).backgroundColor === 'cyan')
+    const lit = words.filter(word => (word.props as { bold?: boolean }).bold === true)
     return { all: words.map(word => word.text.trim()), on: lit.map(word => word.text.trim()) }
   }
   on('classic.UserPromptSubmit', () => ({}))
@@ -338,4 +338,22 @@ test('the mode row follows shift+tab and hook events', async ($, on) => {
   expect((await highlighted()).on).toEqual(['manual'])
   await prompt('bypassPermissions')
   expect(await highlighted()).toEqual({ all: ['manual', 'edits', 'plan', 'auto', 'bypass'], on: ['bypass'] })
+
+  // Each arrow joins its segment's shade to the next one's; the active shade differs from its rest shade.
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const shade = async (text: RegExp) =>
+    ((await ui.find({ type: 'Text', text }))?.props as { backgroundColor?: string } | undefined)?.backgroundColor
+  const arrows = (await ui.findAll({ type: 'Text', text: /^\ue0b0$/ })).map(
+    found => found.props as { color?: string; backgroundColor?: string },
+  )
+  const shades = [await shade(/^ manual $/), await shade(/^ edits $/), await shade(/^ plan $/), await shade(/^ auto $/), await shade(/^ bypass $/)]
+  expect(arrows.map(a => a.color)).toEqual(shades)
+  expect(arrows.map(a => a.backgroundColor)).toEqual([...shades.slice(1), undefined])
+  expect(new Set(shades).size).toBe(5)
+  await ui.unmount()
+  await prompt('auto')
+  const ui2 = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const autoOn = ((await ui2.find({ type: 'Text', text: /^ auto $/ }))?.props as { backgroundColor?: string }).backgroundColor
+  await ui2.unmount()
+  expect(autoOn).not.toBe(shades[3])
 })

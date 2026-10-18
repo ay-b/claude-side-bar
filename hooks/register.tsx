@@ -103,14 +103,16 @@ const settle = (list: Task[], now: number): Task[] =>
     .filter(task => task.isLive || now - (task.endedAt ?? now) < ENDED_LINGER_MS)
 
 const MODE_HINT = '(shift+tab to cycle)'
-const MODES: [mode: string, word: string, label: RegExp][] = [
-  ['default', 'manual', /\bmanual mode on\b/],
-  ['acceptEdits', 'edits', /\baccept edits on\b/],
-  ['plan', 'plan', /\bplan mode on\b/],
-  ['auto', 'auto', /\bauto mode on\b/],
-  ['bypassPermissions', 'bypass', /\bbypass permissions on\b/],
-  ['dontAsk', 'dontask', /\bdon't ask mode on\b/],
+// Each mode's hue: a dark shade at rest, the bright one while active.
+const MODES: [mode: string, word: string, label: RegExp, dark: string, bright: string][] = [
+  ['default', 'manual', /\bmanual mode on\b/, '#3a3a3a', '#d0d0d0'],
+  ['acceptEdits', 'edits', /\baccept edits on\b/, '#3b2d5a', '#af87ff'],
+  ['plan', 'plan', /\bplan mode on\b/, '#1d3a5a', '#5fafff'],
+  ['auto', 'auto', /\bauto mode on\b/, '#2a4a2a', '#87d787'],
+  ['bypassPermissions', 'bypass', /\bbypass permissions on\b/, '#5a1f1f', '#ff5f5f'],
+  ['dontAsk', 'dontask', /\bdon't ask mode on\b/, '#5a3a1a', '#ffaf5f'],
 ]
+const ARROW = '\ue0b0'
 const CYCLE = new Set(['default', 'acceptEdits', 'plan', 'auto'])
 
 // shift+tab's order; a mode missing here has an unknown successor, and a hook event corrects it.
@@ -615,15 +617,22 @@ export const register: Register = on => {
       )
     }
 
+    // Powerline segments: each arrow takes the left segment's shade over the right one's.
+    const segments = MODES.filter(([m]) => CYCLE.has(m) || m === activeMode).map(([m, word, , dark, bright]) => ({
+      m,
+      word,
+      isOn: m === activeMode,
+      shade: m === activeMode ? bright : dark,
+    }))
     const modeRow = (
       <Text wrap="truncate-end">
-        {MODES.filter(([m]) => CYCLE.has(m) || m === activeMode).flatMap(([m, word], i) => [
-          i > 0 ? <Text key={`gap:${m}`}> </Text> : null,
-          m === activeMode ? (
-            <Text key={m} bold color="black" backgroundColor="cyan">{` ${word} `}</Text>
-          ) : (
-            <Text key={m} dimColor>{` ${word} `}</Text>
-          ),
+        {segments.flatMap((seg, i) => [
+          <Text key={seg.m} bold={seg.isOn} color={seg.isOn ? 'black' : '#bcbcbc'} backgroundColor={seg.shade}>
+            {` ${seg.word} `}
+          </Text>,
+          <Text key={`arrow:${seg.m}`} color={seg.shade} backgroundColor={segments[i + 1]?.shade}>
+            {ARROW}
+          </Text>,
         ])}
       </Text>
     )
