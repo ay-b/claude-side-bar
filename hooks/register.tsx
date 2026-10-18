@@ -105,12 +105,12 @@ const settle = (list: Task[], now: number): Task[] =>
 const MODE_HINT = '(shift+tab to cycle)'
 // Each mode's hue: bleached at rest, saturated while active.
 const MODES: [mode: string, word: string, label: RegExp, pale: string, vivid: string][] = [
-  ['default', 'manual', /\bmanual mode on\b/, '#b58c8c', '#ff2a2a'],
-  ['acceptEdits', 'edits', /\baccept edits on\b/, '#b89e85', '#ff8c00'],
-  ['plan', 'plan', /\bplan mode on\b/, '#b3ae85', '#ffd700'],
-  ['auto', 'auto', /\bauto mode on\b/, '#8cad91', '#00d75f'],
-  ['bypassPermissions', 'bypass', /\bbypass permissions on\b/, '#ad8ca8', '#ff00d7'],
-  ['dontAsk', 'dontask', /\bdon't ask mode on\b/, '#8c9cb3', '#0087ff'],
+  ['default', 'manual', /\bmanual mode on\b/, '#f2a0a0', '#ff2a2a'],
+  ['acceptEdits', 'edits', /\baccept edits on\b/, '#f5c48c', '#ff8c00'],
+  ['plan', 'plan', /\bplan mode on\b/, '#f2e48c', '#ffd700'],
+  ['auto', 'auto', /\bauto mode on\b/, '#a0daa8', '#00d75f'],
+  ['bypassPermissions', 'bypass', /\bbypass permissions on\b/, '#eba0de', '#ff00d7'],
+  ['dontAsk', 'dontask', /\bdon't ask mode on\b/, '#a0c4f2', '#0087ff'],
 ]
 const ARROW = '\ue0b0'
 const CYCLE = new Set(['default', 'acceptEdits', 'plan', 'auto'])
