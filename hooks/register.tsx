@@ -16,6 +16,7 @@ const WEEK_LIGHT = [0xcf, 0xe8, 0xff]
 const WEEK_DARK = [0x0a, 0x2a, 0x6b]
 const HEAT_STOPS = [[0x90, 0xe0, 0x90], [0xff, 0xa5, 0x00], [0xff, 0x00, 0x00]]
 const COMPACT_LABEL = 'Cmpct now'
+const QUEUED_LABEL = 'Cmpct next'
 // The button stands out from the bar beneath it by this much per channel, filled or not.
 const BUTTON_LIFT = 0x1a
 // Nerd Font chevrons: nf-fa-chevron_down expands a section, nf-fa-chevron_up collapses it.
@@ -33,6 +34,7 @@ const agentMeta = atom({ plugin: 'side-monitor', key: 'agentMeta' } as const, {}
 const context = atom({ plugin: 'side-monitor', key: 'context' } as const, null)
 const expanded = atom({ plugin: 'side-monitor', key: 'expanded' } as const, null)
 const mode = atom({ plugin: 'side-monitor', key: 'mode' } as const, 'default')
+const compactQueued = atom({ plugin: 'side-monitor', key: 'compactQueued' } as const, false)
 
 const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g
 const ENDED_AGENT = new Set(['completed', 'failed', 'killed'])
@@ -382,12 +384,21 @@ async function compactNow($: EngineInterface): Promise<boolean> {
   }
 }
 
-/** Compacts once the context reaches 85%, retrying while the turn has not yet let go. */
+/** Compacts when queued or once the context reaches 85%, retrying while the turn has not yet let go. */
 async function autoCompact($: EngineInterface, triesLeft: number) {
   autoTimer = undefined
+  const isQueued = await read($, compactQueued)
   const percent = contextOf((await $.session.usage()).context).percent ?? 0
-  if (percent < COMPACT_AT_PERCENT || (await compactNow($))) return
+  if (!isQueued && percent < COMPACT_AT_PERCENT) return
+  if (await compactNow($)) {
+    await update($, compactQueued, () => false)
+    return
+  }
   if (triesLeft > 1) autoTimer = $.clock.after(COMPACT_RETRY_MS, () => void autoCompact($, triesLeft - 1))
+  else if (isQueued) {
+    await update($, compactQueued, () => false)
+    await $.ui.toast('Queued compaction failed: press Cmpct now again')
+  }
 }
 
 function startPolling($: EngineInterface) {
@@ -538,6 +549,7 @@ export const register: Register = on => {
     const fill = await read($, context)
     const openId = await read($, expanded)
     const activeMode = await read($, mode)
+    const isQueued = await read($, compactQueued)
     const now = await $.clock.now()
 
     const cells = (percent: number, of = width) => Math.round((Math.min(100, Math.max(0, percent)) / 100) * of)
@@ -564,7 +576,7 @@ export const register: Register = on => {
         return <Text dimColor>No context reading yet.</Text>
       }
       // The bar runs under the Button too: each of its cells is the bar's color there, lifted.
-      const label = ` ${COMPACT_LABEL} `
+      const label = ` ${isQueued ? QUEUED_LABEL : COMPACT_LABEL} `
       const buttonWidth = label.length + 2
       const barWidth = Math.max(4, width - buttonWidth)
       const fills = heatColors(cells(fill.percent), width, fill.window).map(color => ({ cells: 1, color }))
@@ -575,13 +587,20 @@ export const register: Register = on => {
         </Text>
       )
       const tokens = fill.tokens !== undefined ? ` ${shortTokens(fill.tokens)}/${shortTokens(fill.window)}` : ''
+      // While a turn runs, a press queues compaction for its end; a second press cancels the queue.
       const onCompact = async () => {
-        if (!(await compactNow($))) await $.ui.toast('A turn is running: press Cmpct now after it ends')
+        if (await read($, compactQueued)) {
+          await update($, compactQueued, () => false)
+          await $.ui.toast('Queued compaction cancelled')
+        } else if (!(await compactNow($))) {
+          await update($, compactQueued, () => true)
+          await $.ui.toast('A turn is running: compaction runs when it ends')
+        }
       }
       return (
         <Box flexDirection="row">
           {barLine(`Context: ${Math.round(fill.percent)}%${tokens}`, fills.slice(0, barWidth), barWidth)}
-          <Button key="compact" label={COMPACT_LABEL} plain onPress={onCompact}>
+          <Button key="compact" label={label.trim()} plain onPress={onCompact}>
             {cap(0, '\ue0b6')}
             {[...label].map((char, i) => (
               <Text

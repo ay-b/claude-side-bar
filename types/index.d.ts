@@ -27,6 +27,7 @@ declare module 'claude-code' {
       context: ContextFill | null
       expanded: string | null
       mode: string
+      compactQueued: boolean
     }
   }
 }

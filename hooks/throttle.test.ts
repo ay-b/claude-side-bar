@@ -204,6 +204,76 @@ test('Cmpct now sits on the context row and compacts when pressed', async ($, on
   expect(compacted).toBe(1)
 })
 
+const buttonLabel = async ($: Engine) => {
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const found = await ui.find({ key: 'compact' })
+  await ui.unmount()
+  return (found?.props as { label?: string } | undefined)?.label
+}
+
+test('Cmpct now pressed during a turn compacts when the turn ends, below 85%', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  let isTurnRunning = true
+  let compacted = 0
+  on('session.usage', () => ({ value: usageAt(50) }))
+  on('session.compact', () => {
+    if (isTurnRunning) throw new Error('a turn is running')
+    compacted += 1
+    return summary
+  })
+  on('session.measure', ($, e) => ({ changed: e.changed }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  await $.session.measure({ ...usageAt(50), changed: ['context'] })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'compact' })
+  await ui.unmount()
+  expect(compacted).toBe(0)
+  expect(await buttonLabel($)).toBe('Cmpct next')
+
+  await $.turn.complete(turnEnd('agent-1'))
+  await clock.advance(1_000)
+  expect(compacted).toBe(0)
+
+  isTurnRunning = false
+  await $.turn.complete(turnEnd())
+  await clock.advance(1_000)
+  expect(compacted).toBe(1)
+  expect(await buttonLabel($)).toBe('Cmpct now')
+
+  await $.turn.complete(turnEnd())
+  await clock.advance(1_000)
+  expect(compacted).toBe(1)
+})
+
+test('a second press cancels the queued compaction', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  let isTurnRunning = true
+  let compacted = 0
+  on('session.usage', () => ({ value: usageAt(50) }))
+  on('session.compact', () => {
+    if (isTurnRunning) throw new Error('a turn is running')
+    compacted += 1
+    return summary
+  })
+  on('session.measure', ($, e) => ({ changed: e.changed }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  await $.session.measure({ ...usageAt(50), changed: ['context'] })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'compact' })
+  await ui.press({ key: 'compact' })
+  await ui.unmount()
+  expect(await buttonLabel($)).toBe('Cmpct now')
+
+  isTurnRunning = false
+  await $.turn.complete(turnEnd())
+  await clock.advance(1_000)
+  expect(compacted).toBe(0)
+})
+
 test('Cmpct now is a rounded button one lift above the bar beneath it, reddish once filled', async ($, on) => {
   mock.clock(on, { now: 1_000_000 })
   mock.store(on)
