@@ -102,33 +102,18 @@ const settle = (list: Task[], now: number): Task[] =>
     .filter(task => task.isLive || now - (task.endedAt ?? now) < ENDED_LINGER_MS)
 
 const MODE_HINT = '(shift+tab to cycle)'
-const MODE_LABELS: Record<string, string> = {
-  acceptEdits: '⏵⏵ accept edits on',
-  auto: '⏵⏵ auto mode on',
-  bypassPermissions: '⏵⏵ bypass permissions on',
-  dontAsk: '⏵⏵ don\'t ask mode on',
-  plan: '⏸ plan mode on',
-}
 
 /** The footer hint without the agent count and the mode's cycle hint. */
 export const footerHint = (hint: string): string => {
-  const parts = hint.split(' · ')
+  const parts = hint
+    .split(' · ')
+    .map(part => part.replace(MODE_HINT, '').trim())
+    .filter(part => part.length > 0)
   const hasAgents = parts.some(part => /^← \d+ agents?$/.test(part))
-  const kept = parts.filter(
-    part => part !== MODE_HINT && !/^← \d+ agents?$/.test(part) && !(hasAgents && part === '↓ to manage'),
-  )
+  const kept = parts.filter(part => !/^← \d+ agents?$/.test(part) && !(hasAgents && part === '↓ to manage'))
   const hasOtherTasks = kept.some(part => /^\d+ (shells?|tasks?|monitors?|workflows?)$/.test(part))
   if (hasAgents && hasOtherTasks) kept.push('↓ to manage')
   return kept.join(' · ')
-}
-
-let mode = ''
-
-async function setMode($: EngineInterface, next: string) {
-  if (next === mode) return
-  mode = next
-  const label = MODE_LABELS[next]
-  await $.ui.status(label ? `${label} ${MODE_HINT}` : undefined)
 }
 
 let poll: { cancel: () => void } | undefined
@@ -410,16 +395,10 @@ export const register: Register = on => {
     return step
   })
 
-  // Agents live in the panel, and the mode in the status line, so the footer drops both.
+  // Agents live in the panel, so the footer drops their count; the mode stays, without its cycle hint.
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
     const hint = footerHint(e.props.hint)
-    if (!e.props.hint.includes(MODE_HINT)) await setMode($, 'default')
     return hint === e.props.hint ? next(e) : next({ ...e, props: { ...e.props, hint } })
-  })
-
-  on('classic.*', async ($, e, next) => {
-    if ('permission_mode' in e && typeof e.permission_mode === 'string') await setMode($, e.permission_mode)
-    return next(e)
   })
 
   on('tool.call', { tool: 'Agent' }, async ($, e, next) => {

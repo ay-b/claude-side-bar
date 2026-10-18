@@ -76,6 +76,8 @@ test('the footer drops the agent count and the mode hint, and keeps the rest', a
   expect(footerHint('1 shell · ← 5 agents · ↓ to manage')).toBe('1 shell · ↓ to manage')
   expect(footerHint('? for shortcuts')).toBe('? for shortcuts')
   expect(footerHint('2 shells · ↓ to manage')).toBe('2 shells · ↓ to manage')
+  expect(footerHint('⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt')).toBe('⏵⏵ auto mode on · esc to interrupt')
+  expect(footerHint('⏵⏵ auto mode on · (shift+tab to cycle)')).toBe('⏵⏵ auto mode on')
 })
 
 test('the context bar follows each measure', async ($, on) => {
