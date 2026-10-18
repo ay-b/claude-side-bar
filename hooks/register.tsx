@@ -12,6 +12,8 @@ const EXPANDED_LINES = 300
 const TRACK = '#303030'
 const COMPACT_AT_PERCENT = 85
 const HEAT_FULL_PERCENT = 75
+const WEEK_LIGHT = [0xcf, 0xe8, 0xff]
+const WEEK_DARK = [0x0a, 0x2a, 0x6b]
 const HEAT_STOPS = [[0x90, 0xe0, 0x90], [0xff, 0xa5, 0x00], [0xff, 0x00, 0x00]]
 const COMPACT_LABEL = 'Cmpct now'
 // The button stands out from the bar beneath it by this much per channel, filled or not.
@@ -87,6 +89,21 @@ export const heatColors = (filled: number, width: number, window: number): strin
     const k = t - Math.min(Math.floor(t), HEAT_STOPS.length - 2)
     return `#${from.map((c, n) => Math.round(c + (to[n]! - c) * k).toString(16).padStart(2, '0')).join('')}`
   })
+}
+
+/** The weekly bar's cells: earlier use in very light to dark blue across the bar, this session's solid yellow. */
+export const weekColors = (used: number, mine: number, width: number): string[] =>
+  Array.from({ length: used }, (_, i) => {
+    if (i >= used - mine) return 'yellow'
+    const k = width > 1 ? i / (width - 1) : 0
+    return `#${WEEK_LIGHT.map((c, n) => Math.round(c + (WEEK_DARK[n]! - c) * k).toString(16).padStart(2, '0')).join('')}`
+  })
+
+/** Black text on a light cell, white on a dark one. */
+export const inkOn = (color: string): string => {
+  if (!color.startsWith('#')) return 'black'
+  const [r, g, b] = [1, 3, 5].map(n => parseInt(color.slice(n, n + 2), 16))
+  return 0.299 * r! + 0.587 * g! + 0.114 * b! < 128 ? 'white' : 'black'
 }
 
 /** Lightens a bar color by BUTTON_LIFT per channel. */
@@ -521,7 +538,7 @@ export const register: Register = on => {
     const barRuns = (text: string, fills: { cells: number; color: string }[], of: number, bold?: boolean) =>
       overlay(text, of, fills).map((run, i) =>
         run.background ? (
-          <Text key={String(i)} bold={bold} color="black" backgroundColor={run.background}>
+          <Text key={String(i)} bold={bold} color={inkOn(run.background)} backgroundColor={run.background}>
             {run.text}
           </Text>
         ) : (
@@ -591,10 +608,10 @@ export const register: Register = on => {
         : undefined
 
       const label = `This: ${shortPercent(spent)}, Week: ${shortPercent(shown.current)}${resets ? `, Rst: ${resets}` : ''}`
-      return barLine(label, [
-        { cells: used - mine, color: 'white' },
-        { cells: mine, color: 'yellow' },
-      ])
+      return barLine(
+        label,
+        weekColors(used, mine, width).map(color => ({ cells: 1, color })),
+      )
     }
 
     const agentLine = (meta: AgentMeta) => {

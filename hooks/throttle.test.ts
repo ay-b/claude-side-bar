@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { footerHint, heatColors, lift, modeOf, overlay, shellStatus, shortPercent, shortTokens, tailOf } from './register'
+import { footerHint, heatColors, inkOn, lift, modeOf, overlay, weekColors, shellStatus, shortPercent, shortTokens, tailOf } from './register'
 
 const measure = (percentUsed: number) => ({
   context: { window: 200_000 },
@@ -377,4 +377,16 @@ test('the mode row follows shift+tab and hook events', async ($, on) => {
   expect(autoOn).not.toBe(shades[3])
   expect(shades.slice(0, 4)).toEqual(['#303030', '#444444', '#585858', '#6c6c6c'])
   expect(shades[4]).toBe(autoOn)
+})
+
+test('the weekly bar runs very light to dark blue across the bar; this session stays solid yellow', async () => {
+  const cells = weekColors(30, 5, 40)
+  const lum = (c: string) => [1, 3, 5].map(n => parseInt(c.slice(n, n + 2), 16)).reduce((a, b) => a + b, 0)
+  expect(cells[0]).toBe('#cfe8ff')
+  expect(weekColors(40, 0, 40)[39]).toBe('#0a2a6b')
+  for (let i = 1; i < 25; i++) expect(lum(cells[i]!)).toBeLessThan(lum(cells[i - 1]!))
+  expect(cells.slice(25)).toEqual(Array(5).fill('yellow'))
+  expect(inkOn('#cfe8ff')).toBe('black')
+  expect(inkOn('#0a2a6b')).toBe('white')
+  expect(inkOn('yellow')).toBe('black')
 })
