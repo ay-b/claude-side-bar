@@ -287,11 +287,12 @@ test('a load clears the status line earlier versions pinned', async ($, on) => {
   expect(statuses).toEqual([undefined])
 })
 
-test('the footer names the mode only in the render right after shift+tab', async () => {
-  expect(modeOf('auto mode on (shift+tab to cycle) · ← 1 agent')).toBe('auto')
-  expect(modeOf('manual mode on · ? for shortcuts · ← 1 agent')).toBe('default')
-  expect(modeOf('accept edits on (shift+tab to cycle) · ← 1 agent')).toBe('acceptEdits')
-  expect(modeOf('plan mode on (shift+tab to cycle) · ← 1 agent')).toBe('plan')
+test('the footer names the mode shift+tab left, so the next one is on', async () => {
+  expect(modeOf('auto mode on (shift+tab to cycle) · ← 1 agent')).toBe('default')
+  expect(modeOf('manual mode on · ? for shortcuts · ← 1 agent')).toBe('acceptEdits')
+  expect(modeOf('accept edits on (shift+tab to cycle) · ← 1 agent')).toBe('plan')
+  expect(modeOf('plan mode on (shift+tab to cycle) · ← 1 agent')).toBe('auto')
+  expect(modeOf('bypass permissions on (shift+tab to cycle)')).toBeUndefined()
   expect(modeOf('(shift+tab to cycle) · ← 1 agent')).toBeUndefined()
   expect(modeOf('? for shortcuts · ← 1 agent')).toBeUndefined()
 })
@@ -320,20 +321,20 @@ test('the mode row follows shift+tab and hook events', async ($, on) => {
     await ui.unmount()
     await clock.advance(1)
   }
-  // shift+tab: the named render, then the unnamed one a millisecond later, as the engine sends them.
+  // shift+tab: a render naming the mode left, then an unnamed one a millisecond later, as the engine sends them.
   const shiftTab = async (named: string) => {
     await footer(named)
     await footer('(shift+tab to cycle) · ← 1 agent')
   }
 
   expect(await highlighted()).toEqual({ all: ['manual', 'edits', 'plan', 'auto'], on: ['manual'] })
-  await shiftTab('accept edits on (shift+tab to cycle) · ← 1 agent')
-  expect((await highlighted()).on).toEqual(['edits'])
-  await shiftTab('plan mode on (shift+tab to cycle) · ← 1 agent')
-  expect((await highlighted()).on).toEqual(['plan'])
-  await shiftTab('auto mode on (shift+tab to cycle) · ← 1 agent')
-  expect((await highlighted()).on).toEqual(['auto'])
   await shiftTab('manual mode on · ? for shortcuts · ← 1 agent')
+  expect((await highlighted()).on).toEqual(['edits'])
+  await shiftTab('accept edits on (shift+tab to cycle) · ← 1 agent')
+  expect((await highlighted()).on).toEqual(['plan'])
+  await shiftTab('plan mode on (shift+tab to cycle) · ← 1 agent')
+  expect((await highlighted()).on).toEqual(['auto'])
+  await shiftTab('auto mode on (shift+tab to cycle) · ← 1 agent')
   expect((await highlighted()).on).toEqual(['manual'])
   await prompt('bypassPermissions')
   expect(await highlighted()).toEqual({ all: ['manual', 'edits', 'plan', 'auto', 'bypass'], on: ['bypass'] })

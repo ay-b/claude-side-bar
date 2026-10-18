@@ -113,8 +113,14 @@ const MODES: [mode: string, word: string, label: RegExp][] = [
 ]
 const CYCLE = new Set(['default', 'acceptEdits', 'plan', 'auto'])
 
-/** The mode the footer names: it does so for a moment after each shift+tab, then drops the name. */
-export const modeOf = (hint: string): string | undefined => MODES.find(([, , label]) => label.test(hint))?.[0]
+// shift+tab's order; a mode missing here has an unknown successor, and a hook event corrects it.
+const NEXT: Record<string, string> = { default: 'acceptEdits', acceptEdits: 'plan', plan: 'auto', auto: 'default' }
+
+/** The mode shift+tab entered: for one render after the press, the footer names the mode it left. */
+export const modeOf = (hint: string): string | undefined => {
+  const left = MODES.find(([, , label]) => label.test(hint))?.[0]
+  return left && NEXT[left]
+}
 
 async function setMode($: EngineInterface, next: string) {
   if ((await read($, mode)) !== next) await update($, mode, () => next)
