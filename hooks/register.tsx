@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, SessionContextUsage, SessionRateLimit } from 'claude-code'
+import type { EngineInterface, Register, SessionContextUsage, SessionMessage, SessionRateLimit } from 'claude-code'
 
 import type { AgentMeta, Bar, ContextFill, Task, Weekly } from '../types'
 
@@ -47,6 +47,36 @@ export const tailOf = (text: string, lines = TAIL_LINES): string =>
     .filter(line => line.length > 0)
     .slice(-lines)
     .join('\n')
+
+const RESULT_LINES = 4
+const LABEL_KEYS = ['description', 'command', 'file_path', 'pattern', 'query', 'url', 'prompt']
+
+/** The argument a console row shows for a tool call: its most telling string input, first line only. */
+export const callLabel = (input: Record<string, unknown>): string => {
+  const named = LABEL_KEYS.map(key => input[key]).find(v => typeof v === 'string' && v.length > 0)
+  const any = named ?? Object.values(input).find(v => typeof v === 'string')
+  return typeof any === 'string' ? (any.split('\n')[0] ?? '').slice(0, 80) : ''
+}
+
+/** An agent's transcript as console rows: its text, each tool call, and the head of each result. */
+export const transcriptLines = (
+  messages: Pick<SessionMessage, 'role' | 'text' | 'toolUses'>[],
+  lines = EXPANDED_LINES,
+): string => {
+  const out: string[] = []
+  for (const message of messages) {
+    if (message.role !== 'assistant') continue
+    if (message.text) out.push(...tailOf(message.text, lines).split('\n'))
+    for (const use of message.toolUses) {
+      out.push(`● ${use.tool}(${callLabel(use.input)})`)
+      const result = use.text === undefined ? ['running…'] : tailOf(use.text, Infinity).split('\n')
+      const shown = result[0] ? result.slice(0, RESULT_LINES) : ['(no output)']
+      if (result.length > RESULT_LINES) shown.push(`… +${result.length - RESULT_LINES} lines`)
+      shown.forEach((line, i) => out.push(`${i === 0 ? '  ⎿ ' : '    '}${line}`))
+    }
+  }
+  return out.slice(-lines).join('\n')
+}
 
 /** Reads the engine's trailer on a background shell's output file. */
 export const shellStatus = (tail: string): string | undefined => {
@@ -179,7 +209,6 @@ export const footerHint = (hint: string): string => {
 let poll: { cancel: () => void } | undefined
 let barTimer: { cancel: () => void } | undefined
 let pending: Bar | undefined
-let tasksDir: string | undefined
 let isTicking = false
 
 async function publishBar($: EngineInterface) {
@@ -215,23 +244,23 @@ async function onWeekly($: EngineInterface, week: Weekly) {
   barTimer ??= $.clock.after(wait, () => void publishBar($))
 }
 
-async function findTasksDir($: EngineInterface) {
-  if (tasksDir) return tasksDir
-  const id = await $.session.id()
+// Output files sit under the process's first session id, which /clear does not carry; search every session.
+const TASKS_ROOT = '"${CLAUDE_CODE_TMPDIR:-${TMPDIR:-/tmp}}"/claude-$(id -u)'
+
+/** Finds a background task's output file by its id, which is unique across sessions. */
+async function findOutput($: EngineInterface, taskId: string): Promise<string | undefined> {
   const found = await $.process.run([
     'sh',
     '-c',
-    'ls -d "${CLAUDE_CODE_TMPDIR:-${TMPDIR:-/tmp}}"/claude-$(id -u)/*/"$1"/tasks 2>/dev/null | head -n1',
+    `ls -t ${TASKS_ROOT}/*/*/tasks/"$1".output 2>/dev/null | head -n1`,
     'sh',
-    id,
+    taskId,
   ])
-  tasksDir = found.stdout.trim() || undefined
-  return tasksDir
+  return found.stdout.trim() || undefined
 }
 
 async function readShell($: EngineInterface, shell: Task): Promise<Task> {
-  const dir = await findTasksDir($)
-  const path = shell.outputPath ?? (dir && `${dir}/${shell.id}.output`)
+  const path = shell.outputPath ?? (shell.id.startsWith('bg:') ? await findOutput($, shell.id.slice(3)) : undefined)
   if (!path) return { ...shell, tail: 'output file not found' }
   const out = await $.process.run(['tail', '-c', '32000', path])
   if (out.exitCode !== 0) return { ...shell, outputPath: path, tail: 'output file not found' }
@@ -269,7 +298,7 @@ async function readAgents($: EngineInterface, now: number): Promise<Task[]> {
         const last = [...messages].reverse().find(m => m.role === 'assistant')
         const usedTool = last?.toolUses.at(-1)?.tool
         tail = last?.text ? tailOf(last.text) : usedTool ? `using ${usedTool}` : tail
-        lines = last?.text ? tailOf(last.text, EXPANDED_LINES) : tail
+        lines = transcriptLines(messages) || tail
       }
       return {
         id: agent.id,
@@ -296,28 +325,24 @@ async function readAgents($: EngineInterface, now: number): Promise<Task[]> {
 /** Finds each running foreground shell's output file: its stdout, matched by command text. */
 async function linkForegroundShells($: EngineInterface, list: Task[]): Promise<Map<string, string>> {
   const links = new Map<string, string>()
-  const dir = await findTasksDir($)
-  if (!dir) return links
   const found = await $.process.run([
     'sh',
     '-c',
-    'for p in /proc/[0-9]*; do t=$(readlink "$p/fd/1" 2>/dev/null) || continue; ' +
-      'case "$t" in "$1"/*) printf "%s\\0" "$t"; tr "\\0\\n" "  " <"$p/cmdline"; printf "\\0";; esac; done',
-    'sh',
-    dir,
+    `root=${TASKS_ROOT}; for p in /proc/[0-9]*; do t=$(readlink "$p/fd/1" 2>/dev/null) || continue; ` +
+      'case "$t" in "$root"/*/*/tasks/*.output) printf "%s\\0" "$t"; tr "\\0\\n" "  " <"$p/cmdline"; printf "\\0";; esac; done',
   ])
   const fields = found.stdout.split('\0')
   const flat = (text: string) => text.replace(/[\0\n]/g, ' ')
   for (const shell of list) {
     if (!shell.command) continue
-    const quoted = flat(`eval '${shell.command.replaceAll("'", "'\\''")}'`)
-    for (let i = 0; i + 1 < fields.length; i += 2) {
-      const path = fields[i]
-      const cmdline = fields[i + 1]
-      const isTaken = [...links.values()].includes(path ?? '')
-      if (path && cmdline?.includes(quoted) && !isTaken) {
-        links.set(shell.id, path)
-        break
+    // A PreToolUse hook may prefix the command (rtk), so the exact eval form is tried first, then the body alone.
+    const body = flat(shell.command.replaceAll("'", "'\\''"))
+    for (const wanted of [`eval '${body}'`, body]) {
+      for (let i = 0; i + 1 < fields.length && !links.has(shell.id); i += 2) {
+        const path = fields[i]
+        const cmdline = fields[i + 1]
+        const isTaken = [...links.values()].includes(path ?? '')
+        if (path && cmdline?.includes(wanted) && !isTaken) links.set(shell.id, path)
       }
     }
   }
@@ -508,10 +533,8 @@ export const register: Register = on => {
       await update($, shells, list =>
         list.map(s => (s.id === shell.id ? { ...s, id: `bg:${taskId}`, outputPath: undefined } : s)),
       )
-      const dir = await findTasksDir($)
-      await update($, shells, list =>
-        list.map(s => (s.id === `bg:${taskId}` ? { ...s, outputPath: dir && `${dir}/${taskId}.output` } : s)),
-      )
+      const path = (result as { backgroundOutputPath?: string }).backgroundOutputPath ?? (await findOutput($, taskId))
+      await update($, shells, list => list.map(s => (s.id === `bg:${taskId}` ? { ...s, outputPath: path } : s)))
       startPolling($)
     } else {
       const failed = 'deny' in ran || ran.isError
@@ -660,7 +683,11 @@ export const register: Register = on => {
       const meta = kind === 'Agent' ? metaById[task.id] : undefined
       const room = Math.max(1, e.props.scroll.bodyRows - 2 - (meta ? 1 : 0))
       const output = isOpen ? (task.lines || task.tail || ' ').split('\n').slice(-room) : [task.tail || ' ']
-      const toggle = () => update($, expanded, () => (isOpen ? null : task.id))
+      // A tick right after the press fills the expanded view without waiting for the next poll.
+      const toggle = async () => {
+        await update($, expanded, () => (isOpen ? null : task.id))
+        void tick($)
+      }
       const label = ` ${isOpen ? COLLAPSE_GLYPH : EXPAND_GLYPH} `
       const across = width - label.length - 2
       const name = (task.type ? `${kind}:${task.type}` : kind).slice(0, Math.max(0, across - 5))

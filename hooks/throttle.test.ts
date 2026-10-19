@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { footerHint, heatColors, inkOn, lift, modeOf, overlay, weekColors, shellStatus, shortPercent, shortTokens, tailOf } from './register'
+import { callLabel, footerHint, transcriptLines, heatColors, inkOn, lift, modeOf, overlay, weekColors, shellStatus, shortPercent, shortTokens, tailOf } from './register'
 
 const measure = (percentUsed: number) => ({
   context: { window: 200_000 },
@@ -311,6 +311,7 @@ test('the chevron pill expands a shell section to the pane height and collapses 
   mock.clock(on, { now: 1_000_000 })
   mock.store(on)
   const lines = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join('\n')
+  on('agent.list', () => ({ value: [] }))
   on('tool.call', () => ({ result: { stdout: lines, stderr: '' } }))
   await $.tool.call({ tool: 'Bash', tool_use_id: 'a', command: 'make', description: 'build' } as never)
 
@@ -360,6 +361,28 @@ test('an agent section names its type once, in the divider', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /^\[running\] Design invitations$/ })).toBeDefined()
   const mentions = (await ui.findAll({ type: 'Text', text: /system-architect/ })).map(found => found.text)
   expect(mentions.sort()).toEqual([' Agent:system-architect ', `─\ue0d7 Agent:system-architect \ue0b0${'─'.repeat(8)}`])
+  await ui.unmount()
+})
+
+test('an expanded agent shows its console: calls and their output, not only the last text', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('agent.list', () => ({ value: [{ id: 'a1', type: 'Explore', name: 'Explore', description: 'Find it', status: 'running' }] }))
+  on('session.messages', () => ({
+    value: [
+      { role: 'assistant', text: 'Searching.', toolUses: [{ tool_use_id: 'u', tool: 'Bash', input: { command: 'grep -rn foo' }, text: 'a.go:1: foo' }] },
+      { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'v', tool: 'Read', input: { file_path: '/a.go' } }] },
+    ],
+  }))
+  on('tool.call', () => ({ result: {} }))
+  await $.tool.call({ tool: 'Agent', tool_use_id: 'x', prompt: 'p', description: 'd' } as never)
+  await clock.advance(3_000)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^● Bash/ })).toBeUndefined()
+  await ui.press({ key: 'expand:a1' })
+  const rows = (await ui.findAll({ type: 'Text' })).map(found => found.text)
+  expect(rows.slice(-5)).toEqual(['Searching.', '● Bash(grep -rn foo)', '  ⎿ a.go:1: foo', '● Read(/a.go)', '  ⎿ running…'])
   await ui.unmount()
 })
 
@@ -464,4 +487,42 @@ test('the weekly bar runs very light to dark blue across the bar; this session s
   expect(inkOn('#cfe8ff')).toBe('black')
   expect(inkOn('#0a2a6b')).toBe('white')
   expect(inkOn('yellow')).toBe('black')
+})
+
+test('callLabel prefers the description, then the command, then any string', () => {
+  expect(callLabel({ command: 'ls -la', description: 'List files' })).toBe('List files')
+  expect(callLabel({ command: 'ls -la\necho hi' })).toBe('ls -la')
+  expect(callLabel({ other: 'x' })).toBe('x')
+  expect(callLabel({ n: 1 })).toBe('')
+})
+
+test('transcriptLines shows text, each call, and a capped head of its result', () => {
+  const lines = transcriptLines([
+    { role: 'user', text: 'the prompt', toolUses: [] },
+    {
+      role: 'assistant',
+      text: 'Looking.',
+      toolUses: [
+        { tool_use_id: 'a', tool: 'Bash', input: { command: 'seq 6' }, text: '1\n2\n3\n4\n5\n6' },
+        { tool_use_id: 'b', tool: 'Read', input: { file_path: '/x' } },
+      ],
+    },
+  ]).split('\n')
+  expect(lines).toEqual([
+    'Looking.',
+    '● Bash(seq 6)',
+    '  ⎿ 1',
+    '    2',
+    '    3',
+    '    4',
+    '    … +2 lines',
+    '● Read(/x)',
+    '  ⎿ running…',
+  ])
+  expect(lines.includes('the prompt')).toBe(false)
+})
+
+test('transcriptLines keeps only the newest rows', () => {
+  const rows = transcriptLines([{ role: 'assistant', text: 'a\nb\nc', toolUses: [] }], 2)
+  expect(rows).toBe('b\nc')
 })
