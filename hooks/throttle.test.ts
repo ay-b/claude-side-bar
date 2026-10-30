@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { callLabel, footerHint, transcriptLines, heatColors, inkOn, lift, modeOf, notifiedEnds, overlay, weekColors, shellStatus, shortPercent, shortTokens, tailOf } from './register'
+import { adoptShells, callLabel, commandOf, footerHint, transcriptLines, heatColors, inkOn, lift, modeOf, notifiedEnds, overlay, weekColors, shellStatus, shortPercent, shortTokens, tailOf } from './register'
 
 const measure = (percentUsed: number) => ({
   context: { window: 200_000 },
@@ -568,4 +568,30 @@ test('Clean drops rows whose shell or call is gone and keeps the live ones', asy
   expect(await ui.find({ type: 'Text', text: /still running/ })).toBeDefined()
   for (const gone of [/lost call/, /gone file/, /pkilled/]) expect(await ui.find({ type: 'Text', text: gone })).toBeUndefined()
   await ui.unmount()
+})
+
+test('running shells the panel lost get their rows back, once, with their command as the title', async () => {
+  const wrapper = (body: string) =>
+    `/bin/zsh -c source /snap.sh 2>/dev/null || true && eval '${body}' < /dev/null && pwd -P >| /tmp/cwd`
+  expect(commandOf(wrapper("echo '\\''hi'\\''; make"))).toBe("echo 'hi'; make")
+  const files = [
+    { path: '/tmp/claude-501/p/s/tasks/bvdmnbhcb.output', cmdline: wrapper('emulator -avd lights') },
+    { path: '/tmp/claude-501/p/s/tasks/b3gjq9gmv.output', cmdline: wrapper('./cycle5.sh 2>&1') },
+    { path: '/tmp/claude-501/p/s/tasks/fgfile.output', cmdline: wrapper('make test') },
+  ]
+  const known = [
+    { id: 'bg:b3gjq9gmv', title: 'cycle', status: 'running', tail: '', isLive: true },
+    { id: 'fg:x', title: 'make', status: 'running', tail: '', isLive: true, outputPath: '/tmp/claude-501/p/s/tasks/fgfile.output' },
+  ]
+  expect(adoptShells(known, files)).toEqual([
+    {
+      id: 'bg:bvdmnbhcb',
+      title: 'emulator -avd lights',
+      status: 'running',
+      tail: '',
+      isLive: true,
+      outputPath: '/tmp/claude-501/p/s/tasks/bvdmnbhcb.output',
+      command: 'emulator -avd lights',
+    },
+  ])
 })

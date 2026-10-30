@@ -258,14 +258,15 @@ async function onWeekly($: EngineInterface, week: Weekly) {
 }
 
 // Output files sit under the process's first session id, which /clear does not carry; search every session.
-const TASKS_ROOT = '"${CLAUDE_CODE_TMPDIR:-${TMPDIR:-/tmp}}"/claude-$(id -u)'
+// The engine writes them under /tmp whatever TMPDIR says (on macOS a /var/folders path); TMPDIR is searched too.
+const TASKS_ROOTS = '"${CLAUDE_CODE_TMPDIR:-/tmp}"/claude-$(id -u) "${TMPDIR:-/tmp}"/claude-$(id -u)'
 
 /** Finds a background task's output file by its id, which is unique across sessions. */
 async function findOutput($: EngineInterface, taskId: string): Promise<string | undefined> {
   const found = await $.process.run([
     'sh',
     '-c',
-    `ls -t ${TASKS_ROOT}/*/*/tasks/"$1".output 2>/dev/null | head -n1`,
+    `for root in ${TASKS_ROOTS}; do ls -t "$root"/*/*/tasks/"$1".output 2>/dev/null; done | head -n1`,
     'sh',
     taskId,
   ])
@@ -293,8 +294,8 @@ async function endShells($: EngineInterface, ends: [id: string, status: string][
 
 async function readShell($: EngineInterface, shell: Task): Promise<Task> {
   const path = shell.outputPath ?? (shell.id.startsWith('bg:') ? await findOutput($, shell.id.slice(3)) : undefined)
-  // With its output file gone, nothing can say the shell still runs.
-  if (!path) return { ...shell, status: 'gone', isLive: false, tail: 'output file not found' }
+  // A file never found says nothing of the shell; one found and then gone, that it is over.
+  if (!path) return { ...shell, tail: 'output file not found' }
   const out = await $.process.run(['tail', '-c', '32000', path])
   if (out.exitCode !== 0) return { ...shell, outputPath: path, status: 'gone', isLive: false, tail: 'output file not found' }
   const all = tailOf(out.stdout, EXPANDED_LINES + 1)
@@ -356,31 +357,60 @@ async function readAgents($: EngineInterface, now: number): Promise<Task[]> {
   return settle(rows, now)
 }
 
-/** Finds each running foreground shell's output file: its stdout, matched by command text. */
-async function linkForegroundShells($: EngineInterface, list: Task[]): Promise<Map<string, string>> {
-  const links = new Map<string, string>()
+type ShellFile = { path: string; cmdline: string }
+
+/**
+ * This session's running shells: each child of the engine whose stdout is a task output file, with its
+ * command line. `$PPID` in the engine's `sh` is the engine itself, so other sessions' shells stay out.
+ */
+async function listShellFiles($: EngineInterface): Promise<ShellFile[]> {
   const found = await $.process.run([
     'sh',
     '-c',
-    `root=${TASKS_ROOT}; for p in /proc/[0-9]*; do t=$(readlink "$p/fd/1" 2>/dev/null) || continue; ` +
-      'case "$t" in "$root"/*/*/tasks/*.output) printf "%s\\0" "$t"; tr "\\0\\n" "  " <"$p/cmdline"; printf "\\0";; esac; done',
-  ])
-  const fields = found.stdout.split('\0')
+    'pids=$(pgrep -P "$PPID" | paste -sd, -); [ -n "$pids" ] || exit 0; ' +
+      'lsof -a -p "$pids" -d 1 -Fpn 2>/dev/null | while IFS= read -r line; do case "$line" in ' +
+      'p*) p=${line#p};; n*) t=${line#n}; case "$t" in */tasks/*.output) ' +
+      'printf "%s\\0" "$t"; ps -o command= -p "$p" | tr "\\0\\n" "  "; printf "\\0";; esac;; esac; done',
+  ]).catch(() => undefined)
+  const fields = found?.stdout.split('\0') ?? []
+  const files: ShellFile[] = []
+  for (let i = 0; i + 1 < fields.length; i += 2) files.push({ path: fields[i]!, cmdline: fields[i + 1]! })
+  return files
+}
+
+/** The command a shell runs, out of the engine's `zsh -c '... eval '<command>' ...'` wrapper. */
+export const commandOf = (cmdline: string): string => {
+  const body = /\beval '((?:[^']|'\\'')*)'/.exec(cmdline)?.[1]
+  return (body ?? cmdline).replaceAll("'\\''", "'").trim()
+}
+
+/** Matches each running foreground shell to its output file by command text. */
+function linkForegroundShells(list: Task[], files: ShellFile[]): Map<string, string> {
+  const links = new Map<string, string>()
   const flat = (text: string) => text.replace(/[\0\n]/g, ' ')
   for (const shell of list) {
     if (!shell.command) continue
     // A PreToolUse hook may prefix the command (rtk), so the exact eval form is tried first, then the body alone.
     const body = flat(shell.command.replaceAll("'", "'\\''"))
     for (const wanted of [`eval '${body}'`, body]) {
-      for (let i = 0; i + 1 < fields.length && !links.has(shell.id); i += 2) {
-        const path = fields[i]
-        const cmdline = fields[i + 1]
-        const isTaken = [...links.values()].includes(path ?? '')
-        if (path && cmdline?.includes(wanted) && !isTaken) links.set(shell.id, path)
+      for (const { path, cmdline } of files) {
+        const isTaken = [...links.values()].includes(path)
+        if (!links.has(shell.id) && cmdline.includes(wanted) && !isTaken) links.set(shell.id, path)
       }
     }
   }
   return links
+}
+
+/** Rows for running shells of this session the panel has none for (dropped earlier, or started before a reload). */
+export const adoptShells = (list: Task[], files: ShellFile[]): Task[] => {
+  const known = new Set(list.flatMap(s => [s.id, s.outputPath ?? '']))
+  return files.flatMap(({ path, cmdline }) => {
+    const id = `bg:${path.split('/').pop()!.replace(/\.output$/, '')}`
+    if (known.has(id) || known.has(path)) return []
+    const command = commandOf(cmdline)
+    return [{ id, title: (command.split('\n')[0] ?? '').slice(0, 60), status: 'running', tail: '', isLive: true, outputPath: path, command }]
+  })
 }
 
 /** One poll; a call while one runs joins it. */
@@ -406,12 +436,14 @@ async function poll1($: EngineInterface) {
     }
     return next
   })
+  const files = await listShellFiles($)
   let current = await read($, shells)
   const unlinked = current.filter(s => s.isLive && s.id.startsWith('fg:') && !s.outputPath)
   if (unlinked.length > 0) {
-    const links = await linkForegroundShells($, unlinked)
+    const links = linkForegroundShells(unlinked, files)
     current = current.map(s => (links.has(s.id) ? { ...s, outputPath: links.get(s.id) } : s))
   }
+  current = [...current, ...adoptShells(current, files)]
   const refreshed = await Promise.all(
     current.map(shell =>
       shell.isLive && (shell.outputPath || shell.id.startsWith('bg:')) ? readShell($, shell) : shell,
