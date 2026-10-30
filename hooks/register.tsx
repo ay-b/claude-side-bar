@@ -443,7 +443,9 @@ async function poll1($: EngineInterface) {
     const links = linkForegroundShells(unlinked, files)
     current = current.map(s => (links.has(s.id) ? { ...s, outputPath: links.get(s.id) } : s))
   }
-  current = [...current, ...adoptShells(current, files)]
+  const adopted = adoptShells(current, files)
+  const adoptedIds = new Set(adopted.map(s => s.id))
+  current = [...current, ...adopted]
   const refreshed = await Promise.all(
     current.map(shell =>
       shell.isLive && (shell.outputPath || shell.id.startsWith('bg:')) ? readShell($, shell) : shell,
@@ -453,12 +455,18 @@ async function poll1($: EngineInterface) {
   // this module no longer awaits (a reload, a call that never answered) has ended.
   await update($, shells, list =>
     settle(
-      list.map(shell => {
-        if (!shell.isLive) return shell
-        const fresh = refreshed.find(r => r.id === shell.id) ?? shell
-        const isLost = fresh.isLive && fresh.id.startsWith('fg:') && !runningCalls.has(fresh.id.slice(3))
-        return isLost ? { ...fresh, status: 'lost', isLive: false } : fresh
-      }),
+      [
+        ...list.map(shell => {
+          if (!shell.isLive) return shell
+          const fresh = refreshed.find(r => r.id === shell.id) ?? shell
+          const isLost = fresh.isLive && fresh.id.startsWith('fg:') && !runningCalls.has(fresh.id.slice(3))
+          return isLost ? { ...fresh, status: 'lost', isLive: false } : fresh
+        }),
+        // Adopted rows are new to the stored list, unless a hook added the same shell meanwhile.
+        ...refreshed.filter(
+          r => adoptedIds.has(r.id) && !list.some(s => s.id === r.id || s.outputPath === r.outputPath),
+        ),
+      ],
       now,
     ),
   )
@@ -477,6 +485,8 @@ async function clean($: EngineInterface) {
   await update($, agents, list => list.filter(task => task.isLive))
   await update($, shells, list => list.filter(task => task.isLive))
   await update($, expanded, () => null)
+  // A shell the press brought back keeps updating.
+  startPolling($)
 }
 
 let isCompacting = false

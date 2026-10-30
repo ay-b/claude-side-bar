@@ -595,3 +595,33 @@ test('running shells the panel lost get their rows back, once, with their comman
     },
   ])
 })
+
+test('a poll gives running shells with no row their rows back, and keeps polling them', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('agent.list', () => ({ value: [] }))
+  const ran = (exitCode: number, stdout = '') => ({
+    value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+  })
+  const file = '/tmp/claude-501/p/s/tasks/bvdmnbhcb.output'
+  let tail = 'booting\n'
+  on('process.run', (_, e) => {
+    const [cmd, , script, path] = e.argv
+    if (cmd === 'sh' && script?.includes('pgrep -P')) {
+      return ran(0, `${file}\0/bin/zsh -c source /s.sh && eval 'emulator -avd lights' < /dev/null \0`)
+    }
+    if (cmd === 'tail') return ran(path === file ? 0 : 1, tail)
+    if (cmd === 'lsof') return path === file ? ran(0, '42\n') : ran(1)
+    return ran(0)
+  })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'clean' })
+  expect(await ui.find({ type: 'Text', text: /emulator -avd lights/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /booting/ })).toBeDefined()
+  tail = 'boot completed\n'
+  await clock.advance(3_000)
+  expect(await ui.find({ type: 'Text', text: /boot completed/ })).toBeDefined()
+  expect(await ui.findAll({ type: 'Text', text: /^\[running\] emulator -avd lights$/ })).toHaveLength(1)
+  await ui.unmount()
+})
