@@ -22,6 +22,8 @@ const BUTTON_LIFT = 0x1a
 // Nerd Font chevrons: nf-fa-chevron_down expands a section, nf-fa-chevron_up collapses it.
 const EXPAND_GLYPH = ''
 const COLLAPSE_GLYPH = ''
+// nf-md-broom: the mode row's button that rereads every row and drops the ended ones.
+const CLEAN_GLYPH = '\u{f00e2}'
 const COMPACT_RETRY_MS = 2_000
 const COMPACT_TRIES = 5
 
@@ -37,7 +39,8 @@ const mode = atom({ plugin: 'side-monitor', key: 'mode' } as const, 'default')
 const compactQueued = atom({ plugin: 'side-monitor', key: 'compactQueued' } as const, false)
 
 const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g
-const ENDED_AGENT = new Set(['completed', 'failed', 'killed'])
+// An idle teammate waits for a message; it leaves the panel and comes back when it runs again.
+const ENDED_AGENT = new Set(['completed', 'failed', 'killed', 'idle'])
 
 export const tailOf = (text: string, lines = TAIL_LINES): string =>
   text
@@ -86,6 +89,14 @@ export const shellStatus = (tail: string): string | undefined => {
   if (last === '[killed]') return 'killed'
   return undefined
 }
+
+/** Each background task a notification reports ended, with its status: `[taskId, status]`. */
+export const notifiedEnds = (text: string): [id: string, status: string][] =>
+  text.split('<task-notification>').flatMap(block => {
+    const id = /<task-id>([^<]+)<\/task-id>/.exec(block)?.[1]?.trim()
+    const status = /<status>([^<]+)<\/status>/.exec(block)?.[1]?.trim()
+    return id && status ? [[id, status === 'completed' ? 'done' : status] as [string, string]] : []
+  })
 
 const weeklyOf = (limits: SessionRateLimit[]): Weekly | undefined => {
   const week = limits.find(limit => limit.kind === 'seven_day')
@@ -209,7 +220,9 @@ export const footerHint = (hint: string): string => {
 let poll: { cancel: () => void } | undefined
 let barTimer: { cancel: () => void } | undefined
 let pending: Bar | undefined
-let isTicking = false
+let ticking: Promise<void> | undefined
+// The foreground Bash calls this load of the module is awaiting; a live fg row missing here has lost its call.
+const runningCalls = new Set<string>()
 
 async function publishBar($: EngineInterface) {
   barTimer?.cancel()
@@ -259,13 +272,34 @@ async function findOutput($: EngineInterface, taskId: string): Promise<string | 
   return found.stdout.trim() || undefined
 }
 
+/** True when lsof answers that no process has the file open; false when it finds one or cannot say. */
+async function isOrphaned($: EngineInterface, path: string): Promise<boolean> {
+  const found = await $.process.run(['lsof', '-t', '--', path]).catch(() => undefined)
+  return found?.exitCode === 1 && found.stdout.trim() === ''
+}
+
+/** Marks the named background shells ended with the status their notification gave. */
+async function endShells($: EngineInterface, ends: [id: string, status: string][]) {
+  if (ends.length === 0) return
+  const byId = new Map(ends.map(([id, status]) => [`bg:${id}`, status]))
+  const now = await $.clock.now()
+  await update($, shells, list =>
+    settle(
+      list.map(s => (s.isLive && byId.has(s.id) ? { ...s, status: byId.get(s.id)!, isLive: false } : s)),
+      now,
+    ),
+  )
+}
+
 async function readShell($: EngineInterface, shell: Task): Promise<Task> {
   const path = shell.outputPath ?? (shell.id.startsWith('bg:') ? await findOutput($, shell.id.slice(3)) : undefined)
-  if (!path) return { ...shell, tail: 'output file not found' }
+  // With its output file gone, nothing can say the shell still runs.
+  if (!path) return { ...shell, status: 'gone', isLive: false, tail: 'output file not found' }
   const out = await $.process.run(['tail', '-c', '32000', path])
-  if (out.exitCode !== 0) return { ...shell, outputPath: path, tail: 'output file not found' }
+  if (out.exitCode !== 0) return { ...shell, outputPath: path, status: 'gone', isLive: false, tail: 'output file not found' }
   const all = tailOf(out.stdout, EXPANDED_LINES + 1)
-  const ended = shellStatus(all)
+  // A shell killed from outside (pkill) writes no trailer; once no process holds its output file, it has ended.
+  const ended = shellStatus(all) ?? ((await isOrphaned($, path)) ? 'ended' : undefined)
   const lines = ended ? all.split('\n').slice(0, -1).join('\n') : all
   return {
     ...shell,
@@ -349,44 +383,68 @@ async function linkForegroundShells($: EngineInterface, list: Task[]): Promise<M
   return links
 }
 
-async function tick($: EngineInterface) {
-  if (isTicking) return
-  isTicking = true
-  try {
-    const now = await $.clock.now()
-    const nextAgents = await readAgents($, now)
-    await update($, agents, () => nextAgents)
-    await update($, agentMeta, meta => {
-      const next = { ...meta }
-      for (const agent of nextAgents) {
-        const one = next[agent.id] ?? { startedAt: now, contextTokens: 0, outputTokens: 0 }
-        next[agent.id] = !agent.isLive && one.endedAt === undefined ? { ...one, endedAt: now } : one
-      }
-      return next
-    })
-    let current = await read($, shells)
-    const unlinked = current.filter(s => s.isLive && s.id.startsWith('fg:') && !s.outputPath)
-    if (unlinked.length > 0) {
-      const links = await linkForegroundShells($, unlinked)
-      current = current.map(s => (links.has(s.id) ? { ...s, outputPath: links.get(s.id) } : s))
+/** One poll; a call while one runs joins it. */
+function tick($: EngineInterface): Promise<void> {
+  ticking ??= poll1($).finally(() => {
+    ticking = undefined
+  })
+  return ticking
+}
+
+async function poll1($: EngineInterface) {
+  const now = await $.clock.now()
+  const nextAgents = await readAgents($, now)
+  await update($, agents, () => nextAgents)
+  await update($, agentMeta, meta => {
+    const next = { ...meta }
+    for (const agent of nextAgents) {
+      const one = next[agent.id] ?? { startedAt: now, contextTokens: 0, outputTokens: 0 }
+      // An idle teammate that runs again counts its time on.
+      if (agent.isLive && one.endedAt !== undefined) next[agent.id] = { ...one, endedAt: undefined }
+      else if (!agent.isLive && one.endedAt === undefined) next[agent.id] = { ...one, endedAt: now }
+      else next[agent.id] = one
     }
-    const refreshed = await Promise.all(
-      current.map(shell =>
-        shell.isLive && (shell.outputPath || shell.id.startsWith('bg:')) ? readShell($, shell) : shell,
-      ),
-    )
-    // A shell that ended while this tick read it keeps its final state.
-    await update($, shells, list =>
-      settle(list.map(shell => (shell.isLive ? (refreshed.find(r => r.id === shell.id) ?? shell) : shell)), now),
-    )
-    // Polling continues until every ended entry has lingered out of the panel.
-    if (nextAgents.length === 0 && (await read($, shells)).length === 0) {
-      poll?.cancel()
-      poll = undefined
-    }
-  } finally {
-    isTicking = false
+    return next
+  })
+  let current = await read($, shells)
+  const unlinked = current.filter(s => s.isLive && s.id.startsWith('fg:') && !s.outputPath)
+  if (unlinked.length > 0) {
+    const links = await linkForegroundShells($, unlinked)
+    current = current.map(s => (links.has(s.id) ? { ...s, outputPath: links.get(s.id) } : s))
   }
+  const refreshed = await Promise.all(
+    current.map(shell =>
+      shell.isLive && (shell.outputPath || shell.id.startsWith('bg:')) ? readShell($, shell) : shell,
+    ),
+  )
+  // A shell that ended while this tick read it keeps its final state; a foreground row whose call
+  // this module no longer awaits (a reload, a call that never answered) has ended.
+  await update($, shells, list =>
+    settle(
+      list.map(shell => {
+        if (!shell.isLive) return shell
+        const fresh = refreshed.find(r => r.id === shell.id) ?? shell
+        const isLost = fresh.isLive && fresh.id.startsWith('fg:') && !runningCalls.has(fresh.id.slice(3))
+        return isLost ? { ...fresh, status: 'lost', isLive: false } : fresh
+      }),
+      now,
+    ),
+  )
+  // Polling continues until every ended entry has lingered out of the panel.
+  if (nextAgents.length === 0 && (await read($, shells)).length === 0) {
+    poll?.cancel()
+    poll = undefined
+  }
+}
+
+/** Reads every row afresh, then drops each that has ended at once instead of letting it linger. */
+async function clean($: EngineInterface) {
+  // The first poll may be one already under way, read before the press.
+  await tick($)
+  await tick($)
+  await update($, agents, list => list.filter(task => task.isLive))
+  await update($, shells, list => list.filter(task => task.isLive))
+  await update($, expanded, () => null)
 }
 
 let isCompacting = false
@@ -506,6 +564,12 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // The engine reports each background shell's end in a notification, trailer or not.
+  on('prompt.submit', async ($, e, next) => {
+    if (e.origin.kind === 'task-notification') await endShells($, notifiedEnds(e.text))
+    return next(e)
+  })
+
   on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
     startPolling($)
     void tick($)
@@ -525,7 +589,20 @@ export const register: Register = on => {
     }
     await update($, shells, list => [...list, shell])
     startPolling($)
-    const ran = await next(e)
+    runningCalls.add(e.tool_use_id)
+    let ran: Awaited<ReturnType<typeof next>>
+    try {
+      ran = await next(e)
+    } catch (error) {
+      // A call that threw never reports back; without this its row would stay running.
+      const now = await $.clock.now()
+      await update($, shells, list =>
+        settle(list.map(s => (s.id === shell.id ? { ...s, status: 'failed', isLive: false } : s)), now),
+      )
+      throw error
+    } finally {
+      runningCalls.delete(e.tool_use_id)
+    }
 
     const result = ran.result as { stdout?: string; stderr?: string; backgroundTaskId?: string } | undefined
     const taskId = result?.backgroundTaskId
@@ -729,7 +806,7 @@ export const register: Register = on => {
       isOn: m === activeMode,
       shade: m === activeMode ? ACTIVE : (GREYS[i] ?? GREYS.at(-1)!),
     }))
-    const modeRow = (
+    const modeSegments = (
       <Text wrap="truncate-end">
         {segments.flatMap((seg, i) => [
           <Text key={seg.m} bold={seg.isOn} color={seg.isOn ? 'black' : '#d0d0d0'} backgroundColor={seg.shade}>
@@ -740,6 +817,16 @@ export const register: Register = on => {
           </Text>,
         ])}
       </Text>
+    )
+    const modeRow = (
+      <Box flexDirection="row" justifyContent="space-between">
+        {modeSegments}
+        <Button key="clean" label="Clean" plain onPress={() => clean($)}>
+          <Text color={lift(TRACK)}>{'\ue0b6'}</Text>
+          <Text bold backgroundColor={lift(TRACK)}>{` ${CLEAN_GLYPH} `}</Text>
+          <Text color={lift(TRACK)}>{'\ue0b4'}</Text>
+        </Button>
+      </Box>
     )
 
     if (open) return <Box flexDirection="column">{taskSection(open.kind, open.task, true)}</Box>

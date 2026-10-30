@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { callLabel, footerHint, transcriptLines, heatColors, inkOn, lift, modeOf, overlay, weekColors, shellStatus, shortPercent, shortTokens, tailOf } from './register'
+import { callLabel, footerHint, transcriptLines, heatColors, inkOn, lift, modeOf, notifiedEnds, overlay, weekColors, shellStatus, shortPercent, shortTokens, tailOf } from './register'
 
 const measure = (percentUsed: number) => ({
   context: { window: 200_000 },
@@ -69,6 +69,17 @@ test('shell trailers and tails', async () => {
   expect(shellStatus('still going')).toBeUndefined()
   expect(tailOf('1\n\n2\n3\n4\n', 3)).toBe('2\n3\n4')
   expect(tailOf('counter: 7\ncounter: 8\n')).toBe('counter: 8')
+})
+
+test('a task notification ends its shells, trailer or not', async () => {
+  const one = (id: string, status: string) =>
+    `<task-notification>\n<task-id>${id}</task-id>\n<output-file>/t/${id}.output</output-file>\n<status>${status}</status>\n</task-notification>`
+  expect(notifiedEnds(one('bso872b3p', 'failed'))).toEqual([['bso872b3p', 'failed']])
+  expect(notifiedEnds(`${one('a', 'completed')}\n${one('b', 'killed')}`)).toEqual([
+    ['a', 'done'],
+    ['b', 'killed'],
+  ])
+  expect(notifiedEnds('plain prompt')).toEqual([])
 })
 
 test('the footer drops the agent count and the mode hint, and keeps the rest', async () => {
@@ -525,4 +536,36 @@ test('transcriptLines shows text, each call, and a capped head of its result', (
 test('transcriptLines keeps only the newest rows', () => {
   const rows = transcriptLines([{ role: 'assistant', text: 'a\nb\nc', toolUses: [] }], 2)
   expect(rows).toBe('b\nc')
+})
+
+test('Clean drops rows whose shell or call is gone and keeps the live ones', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('agent.list', () => ({ value: [] }))
+  // lsof finds a holder for the live shell's file alone; the others' files are gone or unheld.
+  const ran = (exitCode: number, stdout = '') => ({
+    value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+  })
+  on('process.run', (_, e) => {
+    const [cmd, , , path] = e.argv
+    if (cmd === 'tail') return ran(path === '/t/gone.output' ? 1 : 0, 'working\n')
+    if (cmd === 'lsof') return path === '/t/live.output' ? ran(0, '42\n') : ran(1)
+    return ran(0)
+  })
+  const row = (id: string, title: string, outputPath?: string) => ({ id, title, status: 'running', tail: '', isLive: true, outputPath })
+  // Rows an earlier load of the module left: its foreground call is no longer awaited.
+  let stored = { value: [row('fg:lost', 'lost call'), row('bg:gone', 'gone file', '/t/gone.output'), row('bg:killed', 'pkilled', '/t/killed.output'), row('bg:live', 'still running', '/t/live.output')] as unknown, version: 1 }
+  on('state.get', ($, e, next) => (e.key === 'shells' ? { value: stored } : next(e)))
+  on('state.set', ($, e, next) => {
+    if (e.key !== 'shells') return next(e)
+    stored = { value: e.value, version: stored.version + 1 }
+    return { value: { isSet: true, version: stored.version } }
+  })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lost call/ })).toBeDefined()
+  await ui.press({ key: 'clean' })
+  expect(await ui.find({ type: 'Text', text: /still running/ })).toBeDefined()
+  for (const gone of [/lost call/, /gone file/, /pkilled/]) expect(await ui.find({ type: 'Text', text: gone })).toBeUndefined()
+  await ui.unmount()
 })
