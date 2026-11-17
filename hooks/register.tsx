@@ -9,7 +9,6 @@ const POLL_MS = 3_000
 const ENDED_LINGER_MS = 10_000
 // Bash's own timeout tops out at 10 minutes.
 const FOREGROUND_MAX_MS = 11 * 60_000
-const LOST_AFTER_MISSES = 3
 const BACKFILL_ROWS = 200
 const TAIL_LINES = 1
 const EXPANDED_LINES = 300
@@ -26,11 +25,13 @@ const BUTTON_LIFT = 0x1a
 // Nerd Font chevrons: nf-fa-chevron_down expands a section, nf-fa-chevron_up collapses it.
 const EXPAND_GLYPH = ''
 const COLLAPSE_GLYPH = ''
+// nf-md-broom: the mode row's button that rereads every row and drops the ended ones.
+const CLEAN_GLYPH = '\u{f00e2}'
 const COMPACT_RETRY_MS = 2_000
 // Label ink on the grey track; also what a hovered pill's caps turn, as its body inverts to it.
 const LIGHT_INK = '#d0d0d0'
 const GOOD_END = new Set(['done', 'completed'])
-const QUIET_END = new Set(['ended', 'lost', 'interrupted'])
+const QUIET_END = new Set(['ended', 'lost', 'gone', 'interrupted'])
 const WEEK_YELLOW = '#f5c400'
 const COMPACT_TRIES = 5
 
@@ -47,7 +48,8 @@ const compactQueued = atom({ plugin: 'side-monitor', key: 'compactQueued' } as c
 const consoles = atom({ plugin: 'side-monitor', key: 'consoles' } as const, {})
 
 const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g
-const ENDED_AGENT = new Set(['completed', 'failed', 'killed'])
+// An idle teammate waits for a message; it leaves the panel and comes back when it runs again.
+const ENDED_AGENT = new Set(['completed', 'failed', 'killed', 'idle'])
 
 export const tailOf = (text: string, lines = TAIL_LINES): string =>
   text
@@ -156,6 +158,14 @@ export const shellStatus = (tail: string): string | undefined => {
   if (last === '[killed]') return 'killed'
   return undefined
 }
+
+/** Each background task a notification reports ended, with its status: `[taskId, status]`. */
+export const notifiedEnds = (text: string): [id: string, status: string][] =>
+  text.split('<task-notification>').flatMap(block => {
+    const id = /<task-id>([^<]+)<\/task-id>/.exec(block)?.[1]?.trim()
+    const status = /<status>([^<]+)<\/status>/.exec(block)?.[1]?.trim()
+    return id && status ? [[id, status === 'completed' ? 'done' : status] as [string, string]] : []
+  })
 
 const weeklyOf = (limits: SessionRateLimit[]): Weekly | undefined => {
   const week = limits.find(limit => limit.kind === 'seven_day')
@@ -297,7 +307,11 @@ export const footerHint = (hint: string): string => {
 let poll: { cancel: () => void } | undefined
 let barTimer: { cancel: () => void } | undefined
 let pending: Bar | undefined
-let isTicking = false
+let ticking: Promise<void> | undefined
+// The foreground Bash calls this load of the module is awaiting; a live fg row missing here has lost its call.
+const runningCalls = new Set<string>()
+// Commands of the subagents' Bash calls running now: their shells belong in the agent's console, never adopted as rows.
+const agentCommands = new Map<string, string>()
 
 async function publishBar($: EngineInterface) {
   barTimer?.cancel()
@@ -333,36 +347,54 @@ async function onWeekly($: EngineInterface, week: Weekly) {
 }
 
 // Output files sit under the process's first session id, which /clear does not carry; search every session.
-const TASKS_ROOT = '"${CLAUDE_CODE_TMPDIR:-${TMPDIR:-/tmp}}"/claude-$(id -u)'
+// The engine writes them under /tmp whatever TMPDIR says (on macOS a /var/folders path); TMPDIR is searched too.
+const TASKS_ROOTS = '"${CLAUDE_CODE_TMPDIR:-/tmp}"/claude-$(id -u) "${TMPDIR:-/tmp}"/claude-$(id -u)'
 
 /** Finds a background task's output file by its id, which is unique across sessions. */
 async function findOutput($: EngineInterface, taskId: string): Promise<string | undefined> {
   const found = await $.process.run([
     'sh',
     '-c',
-    `ls -t ${TASKS_ROOT}/*/*/tasks/"$1".output 2>/dev/null | head -n1`,
+    `for root in ${TASKS_ROOTS}; do ls -t "$root"/*/*/tasks/"$1".output 2>/dev/null; done | head -n1`,
     'sh',
     taskId,
   ])
   return found.stdout.trim() || undefined
 }
 
+/** True when lsof answers that no process has the file open; false when it finds one or cannot say. */
+async function isOrphaned($: EngineInterface, path: string): Promise<boolean> {
+  const found = await $.process.run(['lsof', '-t', '--', path]).catch(() => undefined)
+  return found?.exitCode === 1 && found.stdout.trim() === ''
+}
+
+/** Marks the named background shells ended with the status their notification gave. */
+async function endShells($: EngineInterface, ends: [id: string, status: string][]) {
+  if (ends.length === 0) return
+  const byId = new Map(ends.map(([id, status]) => [`bg:${id}`, status]))
+  const now = await $.clock.now()
+  await update($, shells, list =>
+    settle(
+      list.map(s => (s.isLive && byId.has(s.id) ? { ...s, status: byId.get(s.id)!, isLive: false } : s)),
+      now,
+    ),
+  )
+}
+
 async function readShell($: EngineInterface, shell: Task): Promise<Task> {
   const path = shell.outputPath ?? (shell.id.startsWith('bg:') ? await findOutput($, shell.id.slice(3)) : undefined)
-  const out = path ? await $.process.run(['tail', '-c', '32000', path]) : undefined
-  if (!out || out.exitCode !== 0) {
-    // A background shell whose output file stays gone has ended without its trailer.
-    const misses = (shell.misses ?? 0) + 1
-    const isLost = shell.id.startsWith('bg:') && misses >= LOST_AFTER_MISSES
-    return { ...shell, outputPath: path, misses, tail: shell.tail || 'output file not found', ...(isLost && { isLive: false, status: 'lost' }) }
-  }
+  // A file never found says nothing of the shell; one found and then gone, that it is over.
+  if (!path) return { ...shell, tail: shell.tail || 'output file not found' }
+  const out = await $.process.run(['tail', '-c', '32000', path])
+  if (out.exitCode !== 0) return { ...shell, outputPath: path, status: 'gone', isLive: false, tail: shell.tail || 'output file not found' }
   const all = tailOf(out.stdout, EXPANDED_LINES + 1)
-  const ended = shellStatus(all)
-  const lines = ended ? all.split('\n').slice(0, -1).join('\n') : all
+  const trailer = shellStatus(all)
+  // A shell killed from outside (pkill) writes no trailer; once no process holds its output file, it has ended.
+  const ended = trailer ?? ((await isOrphaned($, path)) ? 'ended' : undefined)
+  const lines = trailer ? all.split('\n').slice(0, -1).join('\n') : all
   return {
     ...shell,
     outputPath: path,
-    misses: 0,
     status: ended ?? 'running',
     isLive: !ended,
     tail: tailOf(lines),
@@ -435,87 +467,157 @@ async function readAgents($: EngineInterface, now: number): Promise<{ rows: Task
   return { rows: settle(rows, now), ids: new Set(all.map(agent => agent.id)) }
 }
 
-/** Finds each running foreground shell's output file: its stdout, matched by command text. */
-async function linkForegroundShells($: EngineInterface, list: Task[]): Promise<Map<string, string>> {
-  const links = new Map<string, string>()
+type ShellFile = { path: string; cmdline: string }
+
+/**
+ * This session's running shells: each child of the engine whose stdout is a task output file, with its
+ * command line. `$PPID` in the engine's `sh` is the engine itself, so other sessions' shells stay out.
+ */
+async function listShellFiles($: EngineInterface): Promise<ShellFile[]> {
   const found = await $.process.run([
     'sh',
     '-c',
-    `root=${TASKS_ROOT}; for p in /proc/[0-9]*; do t=$(readlink "$p/fd/1" 2>/dev/null) || continue; ` +
-      'case "$t" in "$root"/*/*/tasks/*.output) printf "%s\\0" "$t"; tr "\\0\\n" "  " <"$p/cmdline"; printf "\\0";; esac; done',
-  ])
-  const fields = found.stdout.split('\0')
-  const flat = (text: string) => text.replace(/[\0\n]/g, ' ')
+    'pids=$(pgrep -P "$PPID" | paste -sd, -); [ -n "$pids" ] || exit 0; ' +
+      'lsof -a -p "$pids" -d 1 -Fpn 2>/dev/null | while IFS= read -r line; do case "$line" in ' +
+      'p*) p=${line#p};; n*) t=${line#n}; case "$t" in */tasks/*.output) ' +
+      'printf "%s\\0" "$t"; ps -o command= -p "$p" | tr "\\0\\n" "  "; printf "\\0";; esac;; esac; done',
+  ]).catch(() => undefined)
+  const fields = found?.stdout.split('\0') ?? []
+  const files: ShellFile[] = []
+  for (let i = 0; i + 1 < fields.length; i += 2) files.push({ path: fields[i]!, cmdline: fields[i + 1]! })
+  return files
+}
+
+/** The command a shell runs, out of the engine's `zsh -c '... eval '<command>' ...'` wrapper. */
+export const commandOf = (cmdline: string): string => {
+  const body = /\beval '((?:[^']|'\\'')*)'/.exec(cmdline)?.[1]
+  return (body ?? cmdline).replaceAll("'\\''", "'").trim()
+}
+
+const flat = (text: string) => text.replace(/[\0\n]/g, ' ')
+
+/** Whether a shell's command line runs the command: in the engine's eval form, or the body alone after a prefix (rtk). */
+const runs = (cmdline: string, command: string) => {
+  const body = flat(command.replaceAll("'", "'\\''"))
+  return cmdline.includes(`eval '${body}'`) || cmdline.includes(body)
+}
+
+/** Matches each running foreground shell to its output file by command text. */
+function linkForegroundShells(list: Task[], files: ShellFile[]): Map<string, string> {
+  const links = new Map<string, string>()
   for (const shell of list) {
     if (!shell.command) continue
-    // A PreToolUse hook may prefix the command (rtk), so the exact eval form is tried first, then the body alone.
     const body = flat(shell.command.replaceAll("'", "'\\''"))
+    // The exact eval form is tried first, then the body alone.
     for (const wanted of [`eval '${body}'`, body]) {
-      for (let i = 0; i + 1 < fields.length && !links.has(shell.id); i += 2) {
-        const path = fields[i]
-        const cmdline = fields[i + 1]
-        const isTaken = [...links.values()].includes(path ?? '')
-        if (path && cmdline?.includes(wanted) && !isTaken) links.set(shell.id, path)
+      for (const { path, cmdline } of files) {
+        const isTaken = [...links.values()].includes(path)
+        if (!links.has(shell.id) && cmdline.includes(wanted) && !isTaken) links.set(shell.id, path)
       }
     }
   }
   return links
 }
 
+/**
+ * Rows for running shells of this session the panel has none for (dropped earlier, or started before a
+ * reload), except those a subagent's call runs, which belong in its console.
+ */
+export const adoptShells = (list: Task[], files: ShellFile[], agentRuns: readonly string[] = []): Task[] => {
+  const known = new Set(list.flatMap(s => [s.id, s.outputPath ?? '']))
+  return files.flatMap(({ path, cmdline }) => {
+    const id = `bg:${path.split('/').pop()!.replace(/\.output$/, '')}`
+    if (known.has(id) || known.has(path) || agentRuns.some(command => runs(cmdline, command))) return []
+    const command = commandOf(cmdline)
+    return [{ id, title: (command.split('\n')[0] ?? '').slice(0, 60), status: 'running', tail: '', isLive: true, outputPath: path, command }]
+  })
+}
+
 /** Keeps only the entries of agents the engine still lists. */
 const pruned = <T,>(byId: Record<string, T>, ids: Set<string>): Record<string, T> =>
   Object.fromEntries(Object.entries(byId).filter(([id]) => ids.has(id)))
 
-async function tick($: EngineInterface) {
-  if (isTicking) return
-  isTicking = true
-  try {
-    const now = await $.clock.now()
-    // A failed agent read skips the agents this tick, never the shells' cleanup below.
-    const got = await readAgents($, now).catch(() => undefined)
-    const nextAgents = got?.rows ?? (await read($, agents))
-    const ids = got?.ids ?? new Set(nextAgents.map(agent => agent.id))
-    if (got) await update($, agents, () => nextAgents)
-    await update($, agentMeta, meta => {
-      const next = pruned(meta, ids)
-      for (const agent of nextAgents) {
-        const one = next[agent.id] ?? { startedAt: agent.startedAt ?? now, contextTokens: 0, outputTokens: 0 }
-        next[agent.id] = !agent.isLive && one.endedAt === undefined ? { ...one, endedAt: now } : one
-      }
-      return next
-    })
-    await update($, consoles, byId => (Object.keys(byId).every(id => ids.has(id)) ? byId : pruned(byId, ids)))
-    // A foreground call outlives no Bash timeout; one older, or from before a reload, has lost its hook.
-    await update($, shells, list =>
-      list.map(s =>
-        s.isLive && s.id.startsWith('fg:') && now - (s.startedAt ?? 0) > FOREGROUND_MAX_MS
-          ? { ...s, isLive: false, status: 'lost' }
-          : s,
-      ),
-    )
-    let current = await read($, shells)
-    const unlinked = current.filter(s => s.isLive && s.id.startsWith('fg:') && !s.outputPath)
-    if (unlinked.length > 0) {
-      const links = await linkForegroundShells($, unlinked).catch(() => new Map<string, string>())
-      current = current.map(s => (links.has(s.id) ? { ...s, outputPath: links.get(s.id) } : s))
+/** One poll; a call while one runs joins it. */
+function tick($: EngineInterface): Promise<void> {
+  ticking ??= poll1($).finally(() => {
+    ticking = undefined
+  })
+  return ticking
+}
+
+async function poll1($: EngineInterface) {
+  const now = await $.clock.now()
+  // A failed agent read skips the agents this tick, never the shells' cleanup below.
+  const got = await readAgents($, now).catch(() => undefined)
+  const nextAgents = got?.rows ?? (await read($, agents))
+  const ids = got?.ids ?? new Set(nextAgents.map(agent => agent.id))
+  if (got) await update($, agents, () => nextAgents)
+  await update($, agentMeta, meta => {
+    const next = pruned(meta, ids)
+    for (const agent of nextAgents) {
+      const one = next[agent.id] ?? { startedAt: agent.startedAt ?? now, contextTokens: 0, outputTokens: 0 }
+      // An idle teammate that runs again counts its time on.
+      if (agent.isLive && one.endedAt !== undefined) next[agent.id] = { ...one, endedAt: undefined }
+      else if (!agent.isLive && one.endedAt === undefined) next[agent.id] = { ...one, endedAt: now }
+      else next[agent.id] = one
     }
-    const refreshed = await Promise.all(
-      current.map(shell =>
-        shell.isLive && (shell.outputPath || shell.id.startsWith('bg:')) ? readShell($, shell).catch(() => shell) : shell,
-      ),
-    )
-    // A shell that ended while this tick read it keeps its final state.
-    await update($, shells, list =>
-      settle(list.map(shell => (shell.isLive ? (refreshed.find(r => r.id === shell.id) ?? shell) : shell)), now),
-    )
-    // Polling continues until every ended entry has lingered out of the panel.
-    if (nextAgents.length === 0 && (await read($, shells)).length === 0) {
-      poll?.cancel()
-      poll = undefined
-    }
-  } finally {
-    isTicking = false
+    return next
+  })
+  await update($, consoles, byId => (Object.keys(byId).every(id => ids.has(id)) ? byId : pruned(byId, ids)))
+
+  const files = await listShellFiles($)
+  let current = await read($, shells)
+  const unlinked = current.filter(s => s.isLive && s.id.startsWith('fg:') && !s.outputPath)
+  if (unlinked.length > 0) {
+    const links = linkForegroundShells(unlinked, files)
+    current = current.map(s => (links.has(s.id) ? { ...s, outputPath: links.get(s.id) } : s))
   }
+  const adopted = adoptShells(current, files, [...agentCommands.values()])
+  const adoptedIds = new Set(adopted.map(s => s.id))
+  current = [...current, ...adopted]
+  const refreshed = await Promise.all(
+    current.map(shell =>
+      shell.isLive && (shell.outputPath || shell.id.startsWith('bg:')) ? readShell($, shell).catch(() => shell) : shell,
+    ),
+  )
+  // A shell that ended while this tick read it keeps its final state. A foreground row whose call this
+  // load of the module no longer awaits (a reload), or one older than any Bash timeout, has lost its call.
+  await update($, shells, list =>
+    settle(
+      [
+        ...list.map(shell => {
+          if (!shell.isLive) return shell
+          const fresh = refreshed.find(r => r.id === shell.id) ?? shell
+          const isForeground = fresh.isLive && fresh.id.startsWith('fg:')
+          const isLost =
+            isForeground && (!runningCalls.has(fresh.id.slice(3)) || now - (fresh.startedAt ?? 0) > FOREGROUND_MAX_MS)
+          return isLost ? { ...fresh, status: 'lost', isLive: false } : fresh
+        }),
+        // Adopted rows are new to the stored list, unless a hook added the same shell meanwhile.
+        ...refreshed.filter(
+          r => adoptedIds.has(r.id) && !list.some(s => s.id === r.id || s.outputPath === r.outputPath),
+        ),
+      ],
+      now,
+    ),
+  )
+  // Polling continues until every ended entry has lingered out of the panel.
+  if (nextAgents.length === 0 && (await read($, shells)).length === 0) {
+    poll?.cancel()
+    poll = undefined
+  }
+}
+
+/** Reads every row afresh, then drops each that has ended at once instead of letting it linger. */
+async function clean($: EngineInterface) {
+  // The first poll may be one already under way, read before the press.
+  await tick($)
+  await tick($)
+  await update($, agents, list => list.filter(task => task.isLive))
+  await update($, shells, list => list.filter(task => task.isLive))
+  await update($, expanded, () => null)
+  // A shell the press brought back keeps updating.
+  startPolling($)
 }
 
 /** Ends every background shell the engine no longer counts as in flight; at the main loop's stop, every foreground one too. */
@@ -590,13 +692,6 @@ async function autoCompact($: EngineInterface, triesLeft: number) {
   }
 }
 
-/** The person's reset: drops every shell row and every agent row the engine no longer runs. */
-async function clearRows($: EngineInterface) {
-  await update($, shells, () => [])
-  await update($, agents, list => list.filter(agent => agent.isLive))
-  await update($, expanded, () => null)
-}
-
 function startPolling($: EngineInterface) {
   poll ??= $.clock.every(POLL_MS, () => void tick($))
 }
@@ -620,11 +715,14 @@ async function agentCall<R extends { deny?: string; text?: string; result?: unkn
 ): Promise<R> {
   await appendRow($, agentId, { kind: 'call', id: e.tool_use_id, tool: e.tool, label: callLabel(e as Record<string, unknown>) })
   startPolling($)
+  const command = (e as { command?: unknown }).command
+  if (e.tool === 'Bash' && typeof command === 'string') agentCommands.set(e.tool_use_id, command)
   let ran: R | undefined
   try {
     ran = await next(e as never)
     return ran
   } finally {
+    agentCommands.delete(e.tool_use_id)
     const head = resultHead(resultText(ran))
     const isError = !ran || ran.deny !== undefined || ran.isError === true
     await update($, consoles, byId => ({
@@ -668,12 +766,16 @@ async function mainShell<R extends { deny?: string; text?: string; result?: unkn
       ),
     )
   }
+  runningCalls.add(toolUseId)
   let ran: R
   try {
     ran = await run()
   } catch (error) {
+    // A call that threw never reports back; without this its row would stay running.
     await finish('interrupted', '')
     throw error
+  } finally {
+    runningCalls.delete(toolUseId)
   }
 
   const result = ran.result as { backgroundTaskId?: string; backgroundOutputPath?: string } | undefined
@@ -768,6 +870,12 @@ export const register: Register = on => {
   // Classic hook events name the mode too, which covers a session the footer has not yet named it in.
   on('classic.*', async ($, e, next) => {
     if ('permission_mode' in e && typeof e.permission_mode === 'string') await setMode($, e.permission_mode)
+    return next(e)
+  })
+
+  // The engine reports each background shell's end in a notification, trailer or not.
+  on('prompt.submit', async ($, e, next) => {
+    if (e.origin.kind === 'task-notification') await endShells($, notifiedEnds(e.text))
     return next(e)
   })
 
@@ -937,7 +1045,7 @@ export const register: Register = on => {
         <Box flexDirection="column" gap={1}>
           <Box flexDirection="row" justifyContent="space-between" alignItems="center">
             {modes}
-            <Button key="clear" label="Clear" variant="secondary" onPress={() => clearRows($)} />
+            <Button key="clean" label="Clean" variant="secondary" onPress={() => clean($)} />
           </Box>
           {weekBlock}
           {contextBlock}
@@ -1077,10 +1185,10 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column">
-        {/* As wide as the bars below, so Clear ends where Cmpct now does. */}
+        {/* As wide as the bars below, so the broom ends where Cmpct now does. */}
         <Box flexDirection="row" width={width} justifyContent="space-between">
           {modeRow}
-          {pill('clear-pill', 'clear', 'Clear', ' Clear ', () => clearRows($))}
+          {pill('clean-pill', 'clean', 'Clean', ` ${CLEAN_GLYPH} `, () => clean($))}
         </Box>
         <Text bold>Session cost</Text>
         {weekSection()}

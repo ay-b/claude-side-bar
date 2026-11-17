@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { callLabel, footerHint, transcriptLines, weekSvg, heatColors, inkOn, lift, modeOf, overlay, weekColors, shellStatus, shortPercent, shortTokens, tailOf } from './register'
+import { adoptShells, callLabel, commandOf, footerHint, notifiedEnds, transcriptLines, weekSvg, heatColors, inkOn, lift, modeOf, overlay, weekColors, shellStatus, shortPercent, shortTokens, tailOf } from './register'
 
 const measure = (percentUsed: number) => ({
   context: { window: 200_000 },
@@ -69,6 +69,17 @@ test('shell trailers and tails', async () => {
   expect(shellStatus('still going')).toBeUndefined()
   expect(tailOf('1\n\n2\n3\n4\n', 3)).toBe('2\n3\n4')
   expect(tailOf('counter: 7\ncounter: 8\n')).toBe('counter: 8')
+})
+
+test('a task notification ends its shells, trailer or not', async () => {
+  const one = (id: string, status: string) =>
+    `<task-notification>\n<task-id>${id}</task-id>\n<output-file>/t/${id}.output</output-file>\n<status>${status}</status>\n</task-notification>`
+  expect(notifiedEnds(one('bso872b3p', 'failed'))).toEqual([['bso872b3p', 'failed']])
+  expect(notifiedEnds(`${one('a', 'completed')}\n${one('b', 'killed')}`)).toEqual([
+    ['a', 'done'],
+    ['b', 'killed'],
+  ])
+  expect(notifiedEnds('plain prompt')).toEqual([])
 })
 
 test('the footer drops the agent count and the mode hint, and keeps the rest', async () => {
@@ -629,17 +640,15 @@ test('the main loop stop ends foreground rows and background shells the engine n
   expect(await drawn($, /^\[running\] kept$/)).toBeDefined()
 })
 
-test('a background shell whose output file stays gone is lost after three polls', async ($, on) => {
+test('a background shell whose output file was found and then goes ends at once, and lingers out', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   mock.store(on)
   on('agent.list', () => ({ value: [] }))
   on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: 'No such file' } }) as never)
   on('tool.call', () => ({ result: { backgroundTaskId: 't', backgroundOutputPath: '/tmp/t.output' } }) as never)
   await $.tool.call({ tool: 'Bash', tool_use_id: 'b', command: 'serve', description: 'server' } as never)
-  await clock.advance(6_000)
-  expect(await drawn($, /^\[running\] server$/)).toBeDefined()
   await clock.advance(3_000)
-  expect(await drawn($, /^\[lost\] server$/)).toBeDefined()
+  expect(await drawn($, /^\[gone\] server$/)).toBeDefined()
   await clock.advance(12_000)
   expect(await drawn($, /server/)).toBeUndefined()
 })
@@ -737,35 +746,117 @@ test('a call a backfill already brought in is logged once, its result kept as a 
   await ui.unmount()
 })
 
-test('Clear, a pill at the right of the mode row, drops every shell row and every ended agent', async ($, on) => {
-  const clock = mock.clock(on, { now: 1_000_000 })
+test('Clean is a broom pill at the right of the mode row, always there, ending where Cmpct now does', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
   mock.store(on)
   on('agent.list', () => ({ value: [] }))
-  on('process.run', () => ({ value: { exitCode: 0, stdout: 'going', stderr: '' } }) as never)
-  on('tool.call', () => ({ result: { backgroundTaskId: 't', backgroundOutputPath: '/tmp/t.output' } }) as never)
-  // It stays with nothing to clear, and its row is as wide as the bars, so it ends where Cmpct now does.
-  const empty = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  type Cell = { type?: string; children?: unknown[]; props?: Record<string, unknown>; hover?: { color?: string } }
-  const clearPill = await empty.find({ key: 'clear-pill' })
-  const [capL, body, capR] = (clearPill?.children ?? []) as Cell[]
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  type Cell = { children?: unknown[]; props?: Record<string, unknown>; hover?: { color?: string } }
+  const [capL, body, capR] = ((await ui.find({ key: 'clean-pill' }))?.children ?? []) as Cell[]
   expect(capL?.children).toEqual(['\ue0b6'])
   expect(capR?.children).toEqual(['\ue0b4'])
   expect(capL?.hover).toEqual({ color: '#d0d0d0' })
-  expect((body?.children?.[0] as Cell).props).toMatchObject({ backgroundColor: '#4a4a4a', color: '#d0d0d0' })
-  const row = await empty.find({ type: 'Box', text: /^ manual[^]* Clear \ue0b4$/ })
+  const label = body?.children?.[0] as Cell
+  expect(label.children).toEqual([' \u{f00e2} '])
+  expect(label.props).toMatchObject({ backgroundColor: '#4a4a4a', color: '#d0d0d0' })
+  const row = await ui.find({ type: 'Box', text: /^ manual[^]*\u{f00e2} \ue0b4$/u })
   expect(row?.props).toMatchObject({ width: 42, justifyContent: 'space-between' })
-  await empty.unmount()
+  await ui.unmount()
+  const desk = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await desk.find({ type: 'Button', key: 'clean' }))?.props).toMatchObject({ label: 'Clean' })
+  await desk.unmount()
+})
 
-  await $.tool.call({ tool: 'Bash', tool_use_id: 'b', command: 'serve', description: 'stuck server' } as never)
-  await clock.advance(3_000)
-  for (const surface of ['terminal', 'desktop'] as const) {
-    const ui = await $.ui.mount({ ...PANE, surface })
-    expect(await ui.find({ type: 'Button', key: 'clear' })).toBeDefined()
-    await ui.unmount()
-  }
+test('a running shell started by a subagent call is not adopted as a row of its own', () => {
+  const files = [{ path: '/tmp/claude-501/p/s/tasks/sub.output', cmdline: "/bin/zsh -c eval 'go test ./...' < /dev/null" }]
+  expect(adoptShells([], files, ['go test ./...'])).toEqual([])
+  expect(adoptShells([], files)).toHaveLength(1)
+})
+
+test('Clean drops rows whose shell or call is gone and keeps the live ones', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('agent.list', () => ({ value: [] }))
+  // lsof finds a holder for the live shell's file alone; the others' files are gone or unheld.
+  const ran = (exitCode: number, stdout = '') => ({
+    value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+  })
+  on('process.run', (_, e) => {
+    const [cmd, , , path] = e.argv
+    if (cmd === 'tail') return ran(path === '/t/gone.output' ? 1 : 0, 'working\n')
+    if (cmd === 'lsof') return path === '/t/live.output' ? ran(0, '42\n') : ran(1)
+    return ran(0)
+  })
+  const row = (id: string, title: string, outputPath?: string) => ({ id, title, status: 'running', tail: '', isLive: true, outputPath })
+  // Rows an earlier load of the module left: its foreground call is no longer awaited.
+  let stored = { value: [row('fg:lost', 'lost call'), row('bg:gone', 'gone file', '/t/gone.output'), row('bg:killed', 'pkilled', '/t/killed.output'), row('bg:live', 'still running', '/t/live.output')] as unknown, version: 1 }
+  on('state.get', ($, e, next) => (e.key === 'shells' ? { value: stored } : next(e)))
+  on('state.set', ($, e, next) => {
+    if (e.key !== 'shells') return next(e)
+    stored = { value: e.value, version: stored.version + 1 }
+    return { value: { isSet: true, version: stored.version } }
+  })
+
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  await ui.press({ key: 'clear' })
-  expect(await ui.find({ type: 'Text', text: /stuck server/ })).toBeUndefined()
-  expect(await ui.find({ type: 'Button', key: 'clear' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /lost call/ })).toBeDefined()
+  await ui.press({ key: 'clean' })
+  expect(await ui.find({ type: 'Text', text: /still running/ })).toBeDefined()
+  for (const gone of [/lost call/, /gone file/, /pkilled/]) expect(await ui.find({ type: 'Text', text: gone })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('running shells the panel lost get their rows back, once, with their command as the title', async () => {
+  const wrapper = (body: string) =>
+    `/bin/zsh -c source /snap.sh 2>/dev/null || true && eval '${body}' < /dev/null && pwd -P >| /tmp/cwd`
+  expect(commandOf(wrapper("echo '\\''hi'\\''; make"))).toBe("echo 'hi'; make")
+  const files = [
+    { path: '/tmp/claude-501/p/s/tasks/bvdmnbhcb.output', cmdline: wrapper('emulator -avd lights') },
+    { path: '/tmp/claude-501/p/s/tasks/b3gjq9gmv.output', cmdline: wrapper('./cycle5.sh 2>&1') },
+    { path: '/tmp/claude-501/p/s/tasks/fgfile.output', cmdline: wrapper('make test') },
+  ]
+  const known = [
+    { id: 'bg:b3gjq9gmv', title: 'cycle', status: 'running', tail: '', isLive: true },
+    { id: 'fg:x', title: 'make', status: 'running', tail: '', isLive: true, outputPath: '/tmp/claude-501/p/s/tasks/fgfile.output' },
+  ]
+  expect(adoptShells(known, files)).toEqual([
+    {
+      id: 'bg:bvdmnbhcb',
+      title: 'emulator -avd lights',
+      status: 'running',
+      tail: '',
+      isLive: true,
+      outputPath: '/tmp/claude-501/p/s/tasks/bvdmnbhcb.output',
+      command: 'emulator -avd lights',
+    },
+  ])
+})
+
+test('a poll gives running shells with no row their rows back, and keeps polling them', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('agent.list', () => ({ value: [] }))
+  const ran = (exitCode: number, stdout = '') => ({
+    value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+  })
+  const file = '/tmp/claude-501/p/s/tasks/bvdmnbhcb.output'
+  let tail = 'booting\n'
+  on('process.run', (_, e) => {
+    const [cmd, , script, path] = e.argv
+    if (cmd === 'sh' && script?.includes('pgrep -P')) {
+      return ran(0, `${file}\0/bin/zsh -c source /s.sh && eval 'emulator -avd lights' < /dev/null \0`)
+    }
+    if (cmd === 'tail') return ran(path === file ? 0 : 1, tail)
+    if (cmd === 'lsof') return path === file ? ran(0, '42\n') : ran(1)
+    return ran(0)
+  })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'clean' })
+  expect(await ui.find({ type: 'Text', text: /emulator -avd lights/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /booting/ })).toBeDefined()
+  tail = 'boot completed\n'
+  await clock.advance(3_000)
+  expect(await ui.find({ type: 'Text', text: /boot completed/ })).toBeDefined()
+  expect(await ui.findAll({ type: 'Text', text: /^\[running\] emulator -avd lights$/ })).toHaveLength(1)
   await ui.unmount()
 })

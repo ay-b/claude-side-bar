@@ -14,8 +14,6 @@ export type Task = {
   command?: string
   startedAt?: number
   endedAt?: number
-  /** Polls in a row that found no output file. */
-  misses?: number
 }
 /** One row of an agent's console: a stretch of its text, or a tool call and the head of its result. */
 export type ConsoleRow =
