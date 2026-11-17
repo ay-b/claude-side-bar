@@ -304,14 +304,14 @@ test('Cmpct now is a rounded pill one lift above the bar beneath it, reddish onc
 
   await $.session.measure({ ...usageAt(99), changed: ['context'] })
   const full = await button()
-  // The pane is 40 cells wide: the button covers cells 27 to 39, all filled at 99%.
-  const heat = heatColors(40, 40, 1_000_000)
-  expect(full.left?.props).toMatchObject({ color: lift(heat[27]!), backgroundColor: heat[27] })
+  // The pane is 42 cells wide: the button covers cells 29 to 41, all filled at 99%.
+  const heat = heatColors(42, 42, 1_000_000)
+  expect(full.left?.props).toMatchObject({ color: lift(heat[29]!), backgroundColor: heat[29] })
   expect(full.left?.hover).toEqual({ color: 'black' })
-  expect(full.inner.map(c => c.props?.backgroundColor)).toEqual(heat.slice(28, 39).map(lift))
-  expect(full.right?.props).toMatchObject({ color: lift(heat[39]!), backgroundColor: heat[39] })
+  expect(full.inner.map(c => c.props?.backgroundColor)).toEqual(heat.slice(30, 41).map(lift))
+  expect(full.right?.props).toMatchObject({ color: lift(heat[41]!), backgroundColor: heat[41] })
   expect(full.right?.hover).toEqual({ color: 'black' })
-  expect(heat[39]).toBe('#ff0000')
+  expect(heat[41]).toBe('#ff0000')
 })
 
 test('the chevron pill expands a shell section to the pane height and collapses it', async ($, on) => {
@@ -326,7 +326,7 @@ test('the chevron pill expands a shell section to the pane height and collapses 
   expect(await ui.find({ type: 'Text', text: /^line 59$/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /Session cost/ })).toBeDefined()
   const divider = await ui.find({ type: 'Text', text: /^─\ue0d7 Shell \ue0b0─+$/ })
-  expect(divider?.text).toHaveLength(35)
+  expect(divider?.text).toHaveLength(37)
   const pill = await ui.find({ type: 'Button', key: 'expand:fg:a' })
   expect(pill?.text).toBe(' \uf078 ')
   type Cell = { children?: unknown[]; hover?: { color?: string } }
@@ -372,7 +372,7 @@ test('an agent section names its type once, in the divider', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /^─\ue0d7 Agent:system-architect \ue0b0─+$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^\[running\] Design invitations$/ })).toBeDefined()
   const mentions = (await ui.findAll({ type: 'Text', text: /system-architect/ })).map(found => found.text)
-  expect(mentions.sort()).toEqual([' Agent:system-architect ', `─\ue0d7 Agent:system-architect \ue0b0${'─'.repeat(8)}`])
+  expect(mentions.sort()).toEqual([' Agent:system-architect ', `─\ue0d7 Agent:system-architect \ue0b0${'─'.repeat(10)}`])
   await ui.unmount()
 })
 
@@ -753,7 +753,7 @@ test('Clear, a pill at the right of the mode row, drops every shell row and ever
   expect(capL?.hover).toEqual({ color: '#d0d0d0' })
   expect((body?.children?.[0] as Cell).props).toMatchObject({ backgroundColor: '#4a4a4a', color: '#d0d0d0' })
   const row = await empty.find({ type: 'Box', text: /^ manual[^]* Clear \ue0b4$/ })
-  expect(row?.props).toMatchObject({ width: 40, justifyContent: 'space-between' })
+  expect(row?.props).toMatchObject({ width: 42, justifyContent: 'space-between' })
   await empty.unmount()
 
   await $.tool.call({ tool: 'Bash', tool_use_id: 'b', command: 'serve', description: 'stuck server' } as never)

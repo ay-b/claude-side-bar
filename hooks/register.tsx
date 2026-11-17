@@ -793,7 +793,8 @@ export const register: Register = on => {
     return next(e)
   })
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const width = Math.max(10, (e.props.bodyColumns ?? 40) - 2)
+    // Every row runs to the frame: bodyColumns is the body inside it, with no column held back.
+    const width = Math.max(10, e.props.bodyColumns ?? 40)
     const shown = await read($, bar)
     const agentList = await read($, agents)
     const shellList = await read($, shells)
