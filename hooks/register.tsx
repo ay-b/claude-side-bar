@@ -936,7 +936,7 @@ export const register: Register = on => {
         <Box flexDirection="column" gap={1}>
           <Box flexDirection="row" justifyContent="space-between" alignItems="center">
             {modes}
-            {tasks.length > 0 && <Button key="clear" label="Clear" variant="secondary" onPress={() => clearRows($)} />}
+            <Button key="clear" label="Clear" variant="secondary" onPress={() => clearRows($)} />
           </Box>
           {weekBlock}
           {contextBlock}
@@ -946,6 +946,19 @@ export const register: Register = on => {
     }
 
     const { Box, Button, Text } = $.ui.resolve(e)
+
+    // A rounded pill on the panel's own background: caps outside the Button, which the pointer inverts.
+    const pill = (boxKey: string, buttonKey: string, name: string, text: string, onPress: () => Promise<void>) => (
+      <Box key={boxKey} flexDirection="row">
+        <Text color={lift(TRACK)} hover={{ color: LIGHT_INK }}>{'\ue0b6'}</Text>
+        <Button key={buttonKey} label={name} plain onPress={onPress}>
+          <Text bold color={LIGHT_INK} backgroundColor={lift(TRACK)}>
+            {text}
+          </Text>
+        </Button>
+        <Text color={lift(TRACK)} hover={{ color: LIGHT_INK }}>{'\ue0b4'}</Text>
+      </Box>
+    )
 
     const barRuns = (text: string, fills: { cells: number; color: string }[], of: number, bold?: boolean) =>
       overlay(text, of, fills).map((run, i) =>
@@ -1031,15 +1044,7 @@ export const register: Register = on => {
               <Text color={TITLE_SHADE}>{ARROW}</Text>
               <Text dimColor>{'─'.repeat(Math.max(0, across - 5 - name.length))}</Text>
             </Text>
-            <Box key={`pill:${task.id}`} flexDirection="row">
-              <Text color={lift(TRACK)} hover={{ color: LIGHT_INK }}>{''}</Text>
-              <Button key={`expand:${task.id}`} label={isOpen ? 'Collapse' : 'Expand'} plain onPress={toggleOf(task, isOpen)}>
-                <Text bold color={LIGHT_INK} backgroundColor={lift(TRACK)}>
-                  {label}
-                </Text>
-              </Button>
-              <Text color={lift(TRACK)} hover={{ color: LIGHT_INK }}>{''}</Text>
-            </Box>
+            {pill(`pill:${task.id}`, `expand:${task.id}`, isOpen ? 'Collapse' : 'Expand', label, toggleOf(task, isOpen))}
           </Box>
           <Text wrap="truncate-end">
             <Text color={statusColor(task)}>[{task.status}]</Text> <Text bold>{task.title}</Text>
@@ -1071,13 +1076,10 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column">
-        <Box flexDirection="row" justifyContent="space-between">
+        {/* As wide as the bars below, so Clear ends where Cmpct now does. */}
+        <Box flexDirection="row" width={width} justifyContent="space-between">
           {modeRow}
-          {tasks.length > 0 && (
-            <Button key="clear" label="Clear" plain dimColor onPress={() => clearRows($)}>
-              Clear
-            </Button>
-          )}
+          {pill('clear-pill', 'clear', 'Clear', ' Clear ', () => clearRows($))}
         </Box>
         <Text bold>Session cost</Text>
         {weekSection()}

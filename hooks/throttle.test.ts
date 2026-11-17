@@ -737,14 +737,23 @@ test('a call a backfill already brought in is logged once, its result kept as a 
   await ui.unmount()
 })
 
-test('Clear beside the modes drops every shell row and every ended agent', async ($, on) => {
+test('Clear, a pill at the right of the mode row, drops every shell row and every ended agent', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   mock.store(on)
   on('agent.list', () => ({ value: [] }))
   on('process.run', () => ({ value: { exitCode: 0, stdout: 'going', stderr: '' } }) as never)
   on('tool.call', () => ({ result: { backgroundTaskId: 't', backgroundOutputPath: '/tmp/t.output' } }) as never)
+  // It stays with nothing to clear, and its row is as wide as the bars, so it ends where Cmpct now does.
   const empty = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await empty.find({ type: 'Button', key: 'clear' })).toBeUndefined()
+  type Cell = { type?: string; children?: unknown[]; props?: Record<string, unknown>; hover?: { color?: string } }
+  const clearPill = await empty.find({ key: 'clear-pill' })
+  const [capL, body, capR] = (clearPill?.children ?? []) as Cell[]
+  expect(capL?.children).toEqual(['\ue0b6'])
+  expect(capR?.children).toEqual(['\ue0b4'])
+  expect(capL?.hover).toEqual({ color: '#d0d0d0' })
+  expect((body?.children?.[0] as Cell).props).toMatchObject({ backgroundColor: '#4a4a4a', color: '#d0d0d0' })
+  const row = await empty.find({ type: 'Box', text: /^ manual[^]* Clear \ue0b4$/ })
+  expect(row?.props).toMatchObject({ width: 40, justifyContent: 'space-between' })
   await empty.unmount()
 
   await $.tool.call({ tool: 'Bash', tool_use_id: 'b', command: 'serve', description: 'stuck server' } as never)
@@ -757,6 +766,6 @@ test('Clear beside the modes drops every shell row and every ended agent', async
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'clear' })
   expect(await ui.find({ type: 'Text', text: /stuck server/ })).toBeUndefined()
-  expect(await ui.find({ type: 'Button', key: 'clear' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'clear' })).toBeDefined()
   await ui.unmount()
 })
