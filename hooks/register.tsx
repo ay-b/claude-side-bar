@@ -1,12 +1,16 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, SessionContextUsage, SessionMessage, SessionRateLimit } from 'claude-code'
 
-import type { AgentMeta, Bar, ContextFill, Task, Weekly } from '../types'
+import type { AgentMeta, Bar, ConsoleRow, ContextFill, Task, Weekly } from '../types'
 
 const PANE = 'side-monitor'
 const BAR_MIN_INTERVAL_MS = 180_000
 const POLL_MS = 3_000
 const ENDED_LINGER_MS = 10_000
+// Bash's own timeout tops out at 10 minutes.
+const FOREGROUND_MAX_MS = 11 * 60_000
+const LOST_AFTER_MISSES = 3
+const BACKFILL_ROWS = 200
 const TAIL_LINES = 1
 const EXPANDED_LINES = 300
 const TRACK = '#303030'
@@ -23,6 +27,11 @@ const BUTTON_LIFT = 0x1a
 const EXPAND_GLYPH = ''
 const COLLAPSE_GLYPH = ''
 const COMPACT_RETRY_MS = 2_000
+// Label ink on the grey track; also what a hovered pill's caps turn, as its body inverts to it.
+const LIGHT_INK = '#d0d0d0'
+const GOOD_END = new Set(['done', 'completed'])
+const QUIET_END = new Set(['ended', 'lost'])
+const WEEK_YELLOW = '#f5c400'
 const COMPACT_TRIES = 5
 
 const baseline = atom({ plugin: 'side-monitor', key: 'baseline' } as const, null)
@@ -35,6 +44,7 @@ const context = atom({ plugin: 'side-monitor', key: 'context' } as const, null)
 const expanded = atom({ plugin: 'side-monitor', key: 'expanded' } as const, null)
 const mode = atom({ plugin: 'side-monitor', key: 'mode' } as const, 'default')
 const compactQueued = atom({ plugin: 'side-monitor', key: 'compactQueued' } as const, false)
+const consoles = atom({ plugin: 'side-monitor', key: 'consoles' } as const, {})
 
 const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g
 const ENDED_AGENT = new Set(['completed', 'failed', 'killed'])
@@ -49,33 +59,81 @@ export const tailOf = (text: string, lines = TAIL_LINES): string =>
     .join('\n')
 
 const RESULT_LINES = 4
+const CONSOLE_ROWS = 200
 const LABEL_KEYS = ['description', 'command', 'file_path', 'pattern', 'query', 'url', 'prompt']
+// A tool.call event carries these beside the tool's own input.
+const ENVELOPE_KEYS = new Set(['tool', 'tool_use_id', 'agentId', 'requestMeta'])
 
 /** The argument a console row shows for a tool call: its most telling string input, first line only. */
 export const callLabel = (input: Record<string, unknown>): string => {
   const named = LABEL_KEYS.map(key => input[key]).find(v => typeof v === 'string' && v.length > 0)
-  const any = named ?? Object.values(input).find(v => typeof v === 'string')
+  const any = named ?? Object.entries(input).find(([key, v]) => !ENVELOPE_KEYS.has(key) && typeof v === 'string')?.[1]
   return typeof any === 'string' ? (any.split('\n')[0] ?? '').slice(0, 80) : ''
 }
 
-/** An agent's transcript as console rows: its text, each tool call, and the head of each result. */
+/** An agent's transcript as console rows: its text and each tool call with its result. */
+export const consoleOf = (messages: Pick<SessionMessage, 'role' | 'text' | 'toolUses'>[]): ConsoleRow[] => {
+  const rows: ConsoleRow[] = []
+  for (const message of messages) {
+    if (message.role !== 'assistant') continue
+    if (message.text) rows.push({ kind: 'text', text: message.text })
+    for (const use of message.toolUses) {
+      rows.push({ kind: 'call', id: use.tool_use_id, tool: use.tool, label: callLabel(use.input), result: use.text })
+    }
+  }
+  return rows
+}
+
+const callHead = (row: Extract<ConsoleRow, { kind: 'call' }>) => `${row.isError ? '✗' : '●'} ${row.tool}(${row.label})`
+
+/** Console rows as text: the text, each call, and the first lines of each result. */
+export const consoleText = (rows: ConsoleRow[], lines = EXPANDED_LINES): string => {
+  const out: string[] = []
+  for (const row of rows) {
+    if (row.kind === 'text') {
+      const text = tailOf(row.text, lines)
+      if (text) out.push(...text.split('\n'))
+      continue
+    }
+    out.push(callHead(row))
+    const result = row.result === undefined ? ['running…'] : tailOf(row.result, Infinity).split('\n')
+    const shown = result[0] ? result.slice(0, RESULT_LINES) : ['(no output)']
+    if (result.length > RESULT_LINES) shown.push(`… +${result.length - RESULT_LINES} lines`)
+    shown.forEach((line, i) => out.push(`${i === 0 ? '  ⎿ ' : '    '}${line}`))
+  }
+  return out.slice(-lines).join('\n')
+}
+
+/** An agent's transcript as console text. */
 export const transcriptLines = (
   messages: Pick<SessionMessage, 'role' | 'text' | 'toolUses'>[],
   lines = EXPANDED_LINES,
-): string => {
-  const out: string[] = []
-  for (const message of messages) {
-    if (message.role !== 'assistant') continue
-    if (message.text) out.push(...tailOf(message.text, lines).split('\n'))
-    for (const use of message.toolUses) {
-      out.push(`● ${use.tool}(${callLabel(use.input)})`)
-      const result = use.text === undefined ? ['running…'] : tailOf(use.text, Infinity).split('\n')
-      const shown = result[0] ? result.slice(0, RESULT_LINES) : ['(no output)']
-      if (result.length > RESULT_LINES) shown.push(`… +${result.length - RESULT_LINES} lines`)
-      shown.forEach((line, i) => out.push(`${i === 0 ? '  ⎿ ' : '    '}${line}`))
-    }
+): string => consoleText(consoleOf(messages), lines)
+
+/** What the agent does now: its newest call, or the last line of its newest text. */
+export const nowLine = (rows: ConsoleRow[]): string => {
+  const last = rows.at(-1)
+  if (!last) return ''
+  return last.kind === 'call' ? callHead(last) : tailOf(last.text)
+}
+
+/** The collapsed rows of an agent: the engine's progress summary when it has one, then what it does now. */
+export const agentTail = (summary: string | undefined, description: string, rows: ConsoleRow[]): string => {
+  const said = summary && summary !== description ? tailOf(summary) : ''
+  return [said, nowLine(rows)].filter(Boolean).join('\n')
+}
+
+/** What a finished tool call answered, as text. */
+export const resultText = (ran: { deny?: string; text?: string; result?: unknown; isError?: true } | undefined): string => {
+  if (!ran) return 'interrupted'
+  if (ran.deny) return `denied: ${ran.deny}`
+  if (ran.text !== undefined) return ran.text
+  const result = ran.result as { stdout?: string; stderr?: string } | string | undefined
+  if (typeof result === 'string') return result
+  if (result && (result.stdout !== undefined || result.stderr !== undefined)) {
+    return `${result.stdout ?? ''}\n${result.stderr ?? ''}`
   }
-  return out.slice(-lines).join('\n')
+  return ''
 }
 
 /** Reads the engine's trailer on a background shell's output file. */
@@ -133,6 +191,24 @@ export const weekColors = (used: number, mine: number, width: number): string[] 
     const k = width > 1 ? i / (width - 1) : 0
     return `#${WEEK_LIGHT.map((c, n) => Math.round(c + (WEEK_DARK[n]! - c) * k).toString(16).padStart(2, '0')).join('')}`
   })
+
+const hex = (rgb: number[]) => `#${rgb.map(c => c.toString(16).padStart(2, '0')).join('')}`
+
+/** The weekly bar on a graphical surface: earlier use light to dark blue across the bar, this session yellow. */
+export const weekSvg = (percentUsed: number, spent: number): string => {
+  const used = Math.min(100, Math.max(0, percentUsed))
+  const mine = Math.min(used, Math.max(0, spent))
+  const r = (n: number) => Math.round(n * 100) / 100
+  return (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 6" preserveAspectRatio="none" width="100%" height="8">' +
+    '<defs><linearGradient id="w" gradientUnits="userSpaceOnUse" x1="0" x2="100">' +
+    `<stop offset="0" stop-color="${hex(WEEK_LIGHT)}"/><stop offset="1" stop-color="${hex(WEEK_DARK)}"/></linearGradient>` +
+    '<clipPath id="c"><rect width="100" height="6" rx="3"/></clipPath></defs>' +
+    '<g clip-path="url(#c)"><rect width="100" height="6" fill="#8080802e"/>' +
+    `<rect width="${r(used - mine)}" height="6" fill="url(#w)"/>` +
+    `<rect x="${r(used - mine)}" width="${r(mine)}" height="6" fill="${WEEK_YELLOW}"/></g></svg>`
+  )
+}
 
 /** Black text on a light cell, white on a dark one. */
 export const inkOn = (color: string): string => {
@@ -261,15 +337,20 @@ async function findOutput($: EngineInterface, taskId: string): Promise<string | 
 
 async function readShell($: EngineInterface, shell: Task): Promise<Task> {
   const path = shell.outputPath ?? (shell.id.startsWith('bg:') ? await findOutput($, shell.id.slice(3)) : undefined)
-  if (!path) return { ...shell, tail: 'output file not found' }
-  const out = await $.process.run(['tail', '-c', '32000', path])
-  if (out.exitCode !== 0) return { ...shell, outputPath: path, tail: 'output file not found' }
+  const out = path ? await $.process.run(['tail', '-c', '32000', path]) : undefined
+  if (!out || out.exitCode !== 0) {
+    // A background shell whose output file stays gone has ended without its trailer.
+    const misses = (shell.misses ?? 0) + 1
+    const isLost = shell.id.startsWith('bg:') && misses >= LOST_AFTER_MISSES
+    return { ...shell, outputPath: path, misses, tail: shell.tail || 'output file not found', ...(isLost && { isLive: false, status: 'lost' }) }
+  }
   const all = tailOf(out.stdout, EXPANDED_LINES + 1)
   const ended = shellStatus(all)
   const lines = ended ? all.split('\n').slice(0, -1).join('\n') : all
   return {
     ...shell,
     outputPath: path,
+    misses: 0,
     status: ended ?? 'running',
     isLive: !ended,
     tail: tailOf(lines),
@@ -277,9 +358,19 @@ async function readShell($: EngineInterface, shell: Task): Promise<Task> {
   }
 }
 
-async function readAgents($: EngineInterface, now: number): Promise<Task[]> {
+/** Reads one agent's transcript for an agent whose console the panel has no events of. */
+async function backfill($: EngineInterface, agentId: string): Promise<{ rows: ConsoleRow[] } | { note: string }> {
+  const read = await $.session.messages({ agentId, last: BACKFILL_ROWS })
+  if (Array.isArray(read)) return { rows: consoleOf(read) }
+  const deny = (read as { deny?: string }).deny
+  return { note: `transcript unavailable${deny ? `: ${deny}` : ''}` }
+}
+
+async function readAgents($: EngineInterface, now: number): Promise<{ rows: Task[]; ids: Set<string> }> {
   const known = await read($, agents)
   const all = await $.agent.list()
+  const byConsole = await read($, consoles)
+  const filled: Record<string, ConsoleRow[]> = {}
   // An ended agent shows only if the panel saw it running and it ended moments ago.
   const list = all.filter(agent => {
     if (!ENDED_AGENT.has(agent.status)) return true
@@ -290,16 +381,17 @@ async function readAgents($: EngineInterface, now: number): Promise<Task[]> {
     list.map(async (agent): Promise<Task> => {
       const isLive = !ENDED_AGENT.has(agent.status)
       const before = known.find(task => task.id === agent.id)
-      let tail = before?.tail ?? ''
-      let lines = before?.lines
-      // Ended agents keep their last tail; read the transcript once more as they end.
-      const messages = isLive || !before || before.isLive ? await $.session.messages({ agentId: agent.id }) : undefined
-      if (Array.isArray(messages)) {
-        const last = [...messages].reverse().find(m => m.role === 'assistant')
-        const usedTool = last?.toolUses.at(-1)?.tool
-        tail = last?.text ? tailOf(last.text) : usedTool ? `using ${usedTool}` : tail
-        lines = transcriptLines(messages) || tail
+      let console = byConsole[agent.id] ?? []
+      let note: string | undefined
+      // The panel's events fill the console; an agent it saw none of is read from its transcript.
+      if (console.length === 0 && (isLive || before?.isLive !== false)) {
+        const got = await backfill($, agent.id)
+        if ('rows' in got) {
+          console = got.rows
+          if (console.length > 0) filled[agent.id] = console.slice(-CONSOLE_ROWS)
+        } else note = got.note
       }
+      const tail = agentTail(agent.label, agent.description, console) || note || before?.tail || 'starting…'
       return {
         id: agent.id,
         // The divider shows the type; a name the engine derived from it would repeat it.
@@ -307,19 +399,28 @@ async function readAgents($: EngineInterface, now: number): Promise<Task[]> {
         type: agent.type,
         status: agent.status,
         tail,
-        lines,
+        lines: consoleText(console) || note || tail,
         isLive,
+        startedAt: agent.startTime,
         endedAt: before?.endedAt,
       }
     }),
   )
+  if (Object.keys(filled).length > 0) {
+    await update($, consoles, current => {
+      const next = { ...current }
+      // Events that came in while the transcript was read win.
+      for (const [id, rows] of Object.entries(filled)) if (!next[id]?.length) next[id] = rows
+      return next
+    })
+  }
   const order = known.map(task => task.id)
   rows.sort((a, b) => {
     const ia = order.indexOf(a.id)
     const ib = order.indexOf(b.id)
     return (ia < 0 ? Infinity : ia) - (ib < 0 ? Infinity : ib)
   })
-  return settle(rows, now)
+  return { rows: settle(rows, now), ids: new Set(all.map(agent => agent.id)) }
 }
 
 /** Finds each running foreground shell's output file: its stdout, matched by command text. */
@@ -349,21 +450,34 @@ async function linkForegroundShells($: EngineInterface, list: Task[]): Promise<M
   return links
 }
 
+/** Keeps only the entries of agents the engine still lists. */
+const pruned = <T,>(byId: Record<string, T>, ids: Set<string>): Record<string, T> =>
+  Object.fromEntries(Object.entries(byId).filter(([id]) => ids.has(id)))
+
 async function tick($: EngineInterface) {
   if (isTicking) return
   isTicking = true
   try {
     const now = await $.clock.now()
-    const nextAgents = await readAgents($, now)
+    const { rows: nextAgents, ids } = await readAgents($, now)
     await update($, agents, () => nextAgents)
     await update($, agentMeta, meta => {
-      const next = { ...meta }
+      const next = pruned(meta, ids)
       for (const agent of nextAgents) {
-        const one = next[agent.id] ?? { startedAt: now, contextTokens: 0, outputTokens: 0 }
+        const one = next[agent.id] ?? { startedAt: agent.startedAt ?? now, contextTokens: 0, outputTokens: 0 }
         next[agent.id] = !agent.isLive && one.endedAt === undefined ? { ...one, endedAt: now } : one
       }
       return next
     })
+    await update($, consoles, byId => (Object.keys(byId).every(id => ids.has(id)) ? byId : pruned(byId, ids)))
+    // A foreground call outlives no Bash timeout; one older, or from before a reload, has lost its hook.
+    await update($, shells, list =>
+      list.map(s =>
+        s.isLive && s.id.startsWith('fg:') && now - (s.startedAt ?? 0) > FOREGROUND_MAX_MS
+          ? { ...s, isLive: false, status: 'lost' }
+          : s,
+      ),
+    )
     let current = await read($, shells)
     const unlinked = current.filter(s => s.isLive && s.id.startsWith('fg:') && !s.outputPath)
     if (unlinked.length > 0) {
@@ -387,6 +501,28 @@ async function tick($: EngineInterface) {
   } finally {
     isTicking = false
   }
+}
+
+/** Ends every background shell the engine no longer counts as in flight; at the main loop's stop, every foreground one too. */
+async function reconcile($: EngineInterface, inFlight: readonly { id: string; type: string; command?: string }[], isMainStop: boolean) {
+  const now = await $.clock.now()
+  const running = (shell: Task) =>
+    inFlight.some(task => `bg:${task.id}` === shell.id || (task.type === 'shell' && task.command !== undefined && task.command === shell.command))
+  const list = await read($, shells)
+  const gone = list.filter(s => s.isLive && (s.id.startsWith('bg:') ? !running(s) : isMainStop))
+  if (gone.length === 0) return
+  // A last read picks up an exit trailer written since the previous poll.
+  const final = await Promise.all(gone.map(s => (s.id.startsWith('bg:') ? readShell($, s) : Promise.resolve(s))))
+  await update($, shells, current =>
+    settle(
+      current.map(s => {
+        const end = final.find(f => f.id === s.id)
+        if (!end || !s.isLive) return s
+        return end.isLive ? { ...end, isLive: false, status: 'ended' } : end
+      }),
+      now,
+    ),
+  )
 }
 
 let isCompacting = false
@@ -428,6 +564,91 @@ async function autoCompact($: EngineInterface, triesLeft: number) {
 
 function startPolling($: EngineInterface) {
   poll ??= $.clock.every(POLL_MS, () => void tick($))
+}
+
+async function appendRow($: EngineInterface, agentId: string, row: ConsoleRow) {
+  await update($, consoles, byId => ({ ...byId, [agentId]: [...(byId[agentId] ?? []), row].slice(-CONSOLE_ROWS) }))
+}
+
+/** Logs a subagent's tool call in its console as it starts, and its result as it returns. */
+async function agentCall<R extends { deny?: string; text?: string; result?: unknown; isError?: true }>(
+  $: EngineInterface,
+  agentId: string,
+  e: { tool: string; tool_use_id: string },
+  next: (e: never) => Promise<R>,
+): Promise<R> {
+  await appendRow($, agentId, { kind: 'call', id: e.tool_use_id, tool: e.tool, label: callLabel(e as Record<string, unknown>) })
+  startPolling($)
+  let ran: R | undefined
+  try {
+    ran = await next(e as never)
+    return ran
+  } finally {
+    const result = resultText(ran)
+    const isError = !ran || ran.deny !== undefined || ran.isError === true
+    await update($, consoles, byId => ({
+      ...byId,
+      [agentId]: (byId[agentId] ?? []).map(row =>
+        row.kind === 'call' && row.id === e.tool_use_id ? { ...row, result, isError } : row,
+      ),
+    }))
+  }
+}
+
+/** A main-loop Bash call as a Shell row: live while it runs, then its result, or a background task's id. */
+async function mainShell<R extends { deny?: string; text?: string; result?: unknown; isError?: true }>(
+  $: EngineInterface,
+  toolUseId: string,
+  command: string,
+  description: string | undefined,
+  run: () => Promise<R>,
+): Promise<R> {
+  const shell: Task = {
+    id: `fg:${toolUseId}`,
+    title: description || (command.split('\n')[0] ?? '').slice(0, 60),
+    status: 'running',
+    tail: '',
+    isLive: true,
+    command,
+    startedAt: await $.clock.now(),
+  }
+  await update($, shells, list => [...list, shell])
+  startPolling($)
+  const finish = async (status: string, text: string) => {
+    const now = await $.clock.now()
+    await update($, shells, list =>
+      settle(
+        list.map(s =>
+          s.id === shell.id
+            ? { ...s, status, isLive: false, tail: tailOf(text), lines: tailOf(text, EXPANDED_LINES) }
+            : s,
+        ),
+        now,
+      ),
+    )
+  }
+  let ran: R
+  try {
+    ran = await run()
+  } catch (error) {
+    await finish('interrupted', '')
+    throw error
+  }
+
+  const result = ran.result as { backgroundTaskId?: string; backgroundOutputPath?: string } | undefined
+  const taskId = result?.backgroundTaskId
+  if (taskId) {
+    await update($, shells, list =>
+      list.map(s => (s.id === shell.id ? { ...s, id: `bg:${taskId}`, outputPath: undefined } : s)),
+    )
+    const path = result.backgroundOutputPath ?? (await findOutput($, taskId))
+    await update($, shells, list => list.map(s => (s.id === `bg:${taskId}` ? { ...s, outputPath: path } : s)))
+  } else {
+    const failed = ran.deny !== undefined || ran.isError === true
+    await finish(failed ? 'failed' : 'done', resultText(ran))
+  }
+  startPolling($)
+  return ran
 }
 
 export const register: Register = on => {
@@ -477,6 +698,7 @@ export const register: Register = on => {
     const step = yield* next(e)
     const agentId = e.agentId
     const usage = step.usage
+    if (agentId && step.answer.trim()) await appendRow($, agentId, { kind: 'text', text: step.answer })
     if (agentId && usage) {
       const now = await $.clock.now()
       await update($, agentMeta, meta => {
@@ -506,64 +728,28 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
-    startPolling($)
-    void tick($)
-
+  // Stop and SubagentStop list the session's in-flight background work: a shell missing from it has ended.
+  on('classic.Stop', async ($, e, next) => {
+    if (Array.isArray(e.background_tasks)) await reconcile($, e.background_tasks, true)
     return next(e)
   })
 
-  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    const title = e.description || (e.command.split('\n')[0] ?? '').slice(0, 60)
-    const shell: Task = {
-      id: `fg:${e.tool_use_id}`,
-      title,
-      status: 'running',
-      tail: '',
-      isLive: true,
-      command: e.command,
-    }
-    await update($, shells, list => [...list, shell])
-    startPolling($)
-    const ran = await next(e)
-
-    const result = ran.result as { stdout?: string; stderr?: string; backgroundTaskId?: string } | undefined
-    const taskId = result?.backgroundTaskId
-    if (taskId) {
-      await update($, shells, list =>
-        list.map(s => (s.id === shell.id ? { ...s, id: `bg:${taskId}`, outputPath: undefined } : s)),
-      )
-      const path = (result as { backgroundOutputPath?: string }).backgroundOutputPath ?? (await findOutput($, taskId))
-      await update($, shells, list => list.map(s => (s.id === `bg:${taskId}` ? { ...s, outputPath: path } : s)))
-      startPolling($)
-    } else {
-      const failed = 'deny' in ran || ran.isError
-      const text = result ? `${result.stdout ?? ''}\n${result.stderr ?? ''}` : (ran.text ?? '')
-      const now = await $.clock.now()
-      await update($, shells, list =>
-        settle(
-          list.map(s =>
-            s.id === shell.id
-              ? {
-                  ...s,
-                  status: failed ? 'failed' : 'done',
-                  isLive: false,
-                  tail: tailOf(text),
-                  lines: tailOf(text, EXPANDED_LINES),
-                }
-              : s,
-          ),
-          now,
-        ),
-      )
-      startPolling($)
-    }
-
-    return ran
+  on('classic.SubagentStop', async ($, e, next) => {
+    if (Array.isArray(e.background_tasks)) await reconcile($, e.background_tasks, false)
+    return next(e)
   })
 
+  on('tool.call', async ($, e, next) => {
+    if (e.tool === 'Agent') {
+      startPolling($)
+      void tick($)
+    }
+    // A subagent's calls, its shells included, live in its console.
+    if (e.agentId) return agentCall($, e.agentId, e, next)
+    if (e.tool === 'Bash') return mainShell($, e.tool_use_id, e.command, e.description, () => next(e))
+    return next(e)
+  })
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Button, Text } = $.ui.resolve(e)
     const width = Math.max(10, (e.props.bodyColumns ?? 40) - 2)
     const shown = await read($, bar)
     const agentList = await read($, agents)
@@ -576,6 +762,144 @@ export const register: Register = on => {
     const now = await $.clock.now()
 
     const cells = (percent: number, of = width) => Math.round((Math.min(100, Math.max(0, percent)) / 100) * of)
+
+    // While a turn runs, a press queues compaction for its end; a second press cancels the queue.
+    const onCompact = async () => {
+      if (await read($, compactQueued)) {
+        await update($, compactQueued, () => false)
+        await $.ui.toast('Queued compaction cancelled')
+      } else if (!(await compactNow($))) {
+        await update($, compactQueued, () => true)
+        await $.ui.toast('A turn is running: compaction runs when it ends')
+      }
+    }
+    const compactLabel = isQueued ? QUEUED_LABEL : COMPACT_LABEL
+    const tokens = fill?.tokens !== undefined ? ` ${shortTokens(fill.tokens)}/${shortTokens(fill.window)}` : ''
+
+    const week = shown && (() => {
+      const spent = Math.max(0, shown.current - shown.baseline)
+      const resets = shown.resetsAt
+        ? new Date(shown.resetsAt).toLocaleString('en-GB', { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+        : undefined
+      const label = `This: ${shortPercent(spent)}, Week: ${shortPercent(shown.current)}${resets ? `, Rst: ${resets}` : ''}`
+      return { spent, label }
+    })()
+
+    const agentLine = (meta: AgentMeta) => {
+      const seconds = Math.max(0, Math.round(((meta.endedAt ?? now) - meta.startedAt) / 1000))
+      const time = seconds >= 60 ? `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s` : `${seconds}s`
+      return `${time} · context ${compact(meta.contextTokens)} · out ${compact(meta.outputTokens)} tokens`
+    }
+
+    const tasks = [
+      ...agentList.map(task => ({ kind: 'Agent', task })),
+      ...shellList.map(task => ({ kind: 'Shell', task })),
+    ].sort((a, b) => Number(b.task.isLive) - Number(a.task.isLive))
+    // An expanded section that has lingered out of the panel falls back to the full list.
+    const open = tasks.find(({ task }) => task.id === openId)
+    // A tick right after the press fills the expanded view without waiting for the next poll.
+    const toggleOf = (task: Task, isOpen: boolean) => async () => {
+      await update($, expanded, () => (isOpen ? null : task.id))
+      void tick($)
+    }
+
+    // Powerline segments: each arrow takes the left segment's shade over the right one's.
+    const segments = MODES.filter(([m]) => CYCLE.has(m) || m === activeMode).map(([m, word], i) => ({
+      m,
+      word,
+      isOn: m === activeMode,
+      shade: m === activeMode ? ACTIVE : (GREYS[i] ?? GREYS.at(-1)!),
+    }))
+
+    if (e.surface !== 'terminal') {
+      // A graphical surface draws its own controls: no Nerd Font glyphs, no bars of colored cells.
+      const { Box, Button, Code, Progress, Svg, Text } = $.ui.resolve(e)
+      const tone = (task: Task) =>
+        task.isLive ? 'suggestion' : GOOD_END.has(task.status) ? 'success' : QUIET_END.has(task.status) ? 'inactive' : 'error'
+      const contextBlock =
+        !fill || fill.percent === undefined ? (
+          <Text dimColor>No context reading yet.</Text>
+        ) : (
+          <Box flexDirection="row" alignItems="center" gap={1}>
+            <Box flexGrow={1}>
+              <Progress
+                label="Context"
+                value={fill.percent}
+                max={100}
+                valueText={`${Math.round(fill.percent)}%${tokens ? ` ·${tokens}` : ''}`}
+                color={heatColors(cells(fill.percent, 100), 100, fill.window).at(-1)}
+              />
+            </Box>
+            <Button key="compact" label={compactLabel} variant={isQueued ? 'primary' : 'secondary'} onPress={onCompact} />
+          </Box>
+        )
+      if (e.props.placement === 'widget') {
+        const live = tasks.filter(({ task }) => task.isLive).length
+        return (
+          <Box flexDirection="column">
+            {contextBlock}
+            <Text dimColor>{live === 0 ? 'Nothing running' : `${live} running`}</Text>
+          </Box>
+        )
+      }
+      const weekBlock = !shown || !week ? (
+        <Text dimColor>No weekly-limit reading yet.</Text>
+      ) : (
+        <Box flexDirection="column">
+          <Text>{week.label}</Text>
+          <Svg source={weekSvg(shown.current, week.spent)} alt={week.label} height={8} />
+        </Box>
+      )
+      const modes = (
+        <Text>
+          {segments.map((seg, i) => (
+            <Text key={seg.m} bold={seg.isOn} color={seg.isOn ? 'success' : 'inactive'}>
+              {`${i > 0 ? '  ' : ''}${seg.word}`}
+            </Text>
+          ))}
+        </Text>
+      )
+      const section = (kind: string, task: Task, isOpen: boolean) => {
+        const meta = kind === 'Agent' ? metaById[task.id] : undefined
+        return (
+          <Box flexDirection="column" key={`${kind}:${task.id}`} marginTop={1}>
+            <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+              <Text bold>{task.type ? `${kind} · ${task.type}` : kind}</Text>
+              <Button
+                key={`expand:${task.id}`}
+                label={isOpen ? 'Collapse' : 'Expand'}
+                variant="secondary"
+                onPress={toggleOf(task, isOpen)}
+              />
+            </Box>
+            <Text wrap="truncate-end">
+              <Text color={tone(task)}>{task.status}</Text> {task.title}
+            </Text>
+            {meta && <Text dimColor>{agentLine(meta)}</Text>}
+            {isOpen ? (
+              <Code source={task.lines || task.tail || 'No output yet.'} wrap="wrap" />
+            ) : (
+              (task.tail || 'No output yet.').split('\n').map((line, i) => (
+                <Text key={String(i)} dimColor wrap="truncate-end">
+                  {line}
+                </Text>
+              ))
+            )}
+          </Box>
+        )
+      }
+      if (open) return <Box flexDirection="column">{section(open.kind, open.task, true)}</Box>
+      return (
+        <Box flexDirection="column" gap={1}>
+          {modes}
+          {weekBlock}
+          {contextBlock}
+          {tasks.map(({ kind, task }) => section(kind, task, false))}
+        </Box>
+      )
+    }
+
+    const { Box, Button, Text } = $.ui.resolve(e)
 
     const barRuns = (text: string, fills: { cells: number; color: string }[], of: number, bold?: boolean) =>
       overlay(text, of, fills).map((run, i) =>
@@ -599,95 +923,55 @@ export const register: Register = on => {
         return <Text dimColor>No context reading yet.</Text>
       }
       // The bar runs under the Button too: each of its cells is the bar's color there, lifted.
-      const label = ` ${isQueued ? QUEUED_LABEL : COMPACT_LABEL} `
+      const label = ` ${compactLabel} `
       const buttonWidth = label.length + 2
       const barWidth = Math.max(4, width - buttonWidth)
       const fills = heatColors(cells(fill.percent), width, fill.window).map(color => ({ cells: 1, color }))
       const under = (i: number) => fills[barWidth + i]?.color ?? TRACK
-      const cap = (i: number, glyph: string) => (
-        <Text key={`cap:${i}`} color={lift(under(i))} backgroundColor={under(i)}>
+      const ink = (i: number) => (under(i) === TRACK ? LIGHT_INK : 'black')
+      // The caps sit outside the Button, which the pointer inverts: on hover they take the ink the body turns.
+      const cap = (i: number, glyph: string, hoverInk: string) => (
+        <Text key={`cap:${i}`} color={lift(under(i))} backgroundColor={under(i)} hover={{ color: hoverInk }}>
           {glyph}
         </Text>
       )
-      const tokens = fill.tokens !== undefined ? ` ${shortTokens(fill.tokens)}/${shortTokens(fill.window)}` : ''
-      // While a turn runs, a press queues compaction for its end; a second press cancels the queue.
-      const onCompact = async () => {
-        if (await read($, compactQueued)) {
-          await update($, compactQueued, () => false)
-          await $.ui.toast('Queued compaction cancelled')
-        } else if (!(await compactNow($))) {
-          await update($, compactQueued, () => true)
-          await $.ui.toast('A turn is running: compaction runs when it ends')
-        }
-      }
       return (
         <Box flexDirection="row">
           {barLine(`Context: ${Math.round(fill.percent)}%${tokens}`, fills.slice(0, barWidth), barWidth)}
-          <Button key="compact" label={label.trim()} plain onPress={onCompact}>
-            {cap(0, '\ue0b6')}
-            {[...label].map((char, i) => (
-              <Text
-                key={String(i)}
-                bold
-                color={under(i + 1) === TRACK ? undefined : 'black'}
-                backgroundColor={lift(under(i + 1))}
-              >
-                {char}
-              </Text>
-            ))}
-            {cap(buttonWidth - 1, '\ue0b4')}
-          </Button>
+          <Box key="compact-pill" flexDirection="row">
+            {cap(0, '', ink(1))}
+            <Button key="compact" label={compactLabel} plain onPress={onCompact}>
+              {[...label].map((char, i) => (
+                <Text key={String(i)} bold color={ink(i + 1)} backgroundColor={lift(under(i + 1))}>
+                  {char}
+                </Text>
+              ))}
+            </Button>
+            {cap(buttonWidth - 1, '', ink(label.length))}
+          </Box>
         </Box>
       )
     }
 
     const weekSection = () => {
-      if (!shown) {
+      if (!shown || !week) {
         return <Text dimColor>No weekly-limit reading yet.</Text>
       }
-      const spent = Math.max(0, shown.current - shown.baseline)
       const used = cells(shown.current)
-      const mine = Math.min(used, spent > 0 ? Math.max(1, cells(spent)) : 0)
-      const resets = shown.resetsAt
-        ? new Date(shown.resetsAt).toLocaleString('en-GB', {
-            weekday: 'short',
-            hour: '2-digit',
-            minute: '2-digit',
-          })
-        : undefined
-
-      const label = `This: ${shortPercent(spent)}, Week: ${shortPercent(shown.current)}${resets ? `, Rst: ${resets}` : ''}`
+      const mine = Math.min(used, week.spent > 0 ? Math.max(1, cells(week.spent)) : 0)
       return barLine(
-        label,
+        week.label,
         weekColors(used, mine, width).map(color => ({ cells: 1, color })),
       )
     }
 
-    const agentLine = (meta: AgentMeta) => {
-      const seconds = Math.max(0, Math.round(((meta.endedAt ?? now) - meta.startedAt) / 1000))
-      const time = seconds >= 60 ? `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s` : `${seconds}s`
-      return `${time} · context ${compact(meta.contextTokens)} · out ${compact(meta.outputTokens)} tokens`
-    }
-
     const statusColor = (task: Task) =>
-      task.isLive ? 'cyan' : task.status === 'done' || task.status === 'completed' ? 'green' : 'red'
-
-    const tasks = [
-      ...agentList.map(task => ({ kind: 'Agent', task })),
-      ...shellList.map(task => ({ kind: 'Shell', task })),
-    ].sort((a, b) => Number(b.task.isLive) - Number(a.task.isLive))
-    // An expanded section that has lingered out of the panel falls back to the full list.
-    const open = tasks.find(({ task }) => task.id === openId)
+      task.isLive ? 'cyan' : GOOD_END.has(task.status) ? 'green' : QUIET_END.has(task.status) ? GREYS[4] : 'red'
 
     const taskSection = (kind: string, task: Task, isOpen: boolean) => {
       const meta = kind === 'Agent' ? metaById[task.id] : undefined
       const room = Math.max(1, e.props.scroll.bodyRows - 2 - (meta ? 1 : 0))
-      const output = isOpen ? (task.lines || task.tail || ' ').split('\n').slice(-room) : [task.tail || ' ']
-      // A tick right after the press fills the expanded view without waiting for the next poll.
-      const toggle = async () => {
-        await update($, expanded, () => (isOpen ? null : task.id))
-        void tick($)
-      }
+      const output = (isOpen ? task.lines || task.tail || ' ' : task.tail || ' ').split('\n').slice(-room)
       const label = ` ${isOpen ? COLLAPSE_GLYPH : EXPAND_GLYPH} `
       const across = width - label.length - 2
       const name = (task.type ? `${kind}:${task.type}` : kind).slice(0, Math.max(0, across - 5))
@@ -701,13 +985,15 @@ export const register: Register = on => {
               <Text color={TITLE_SHADE}>{ARROW}</Text>
               <Text dimColor>{'─'.repeat(Math.max(0, across - 5 - name.length))}</Text>
             </Text>
-            <Button key={`expand:${task.id}`} label={isOpen ? 'Collapse' : 'Expand'} plain onPress={toggle}>
-              <Text color={lift(TRACK)}>{''}</Text>
-              <Text bold backgroundColor={lift(TRACK)}>
-                {label}
-              </Text>
-              <Text color={lift(TRACK)}>{''}</Text>
-            </Button>
+            <Box key={`pill:${task.id}`} flexDirection="row">
+              <Text color={lift(TRACK)} hover={{ color: LIGHT_INK }}>{''}</Text>
+              <Button key={`expand:${task.id}`} label={isOpen ? 'Collapse' : 'Expand'} plain onPress={toggleOf(task, isOpen)}>
+                <Text bold color={LIGHT_INK} backgroundColor={lift(TRACK)}>
+                  {label}
+                </Text>
+              </Button>
+              <Text color={lift(TRACK)} hover={{ color: LIGHT_INK }}>{''}</Text>
+            </Box>
           </Box>
           <Text wrap="truncate-end">
             <Text color={statusColor(task)}>[{task.status}]</Text> <Text bold>{task.title}</Text>
@@ -722,13 +1008,6 @@ export const register: Register = on => {
       )
     }
 
-    // Powerline segments: each arrow takes the left segment's shade over the right one's.
-    const segments = MODES.filter(([m]) => CYCLE.has(m) || m === activeMode).map(([m, word], i) => ({
-      m,
-      word,
-      isOn: m === activeMode,
-      shade: m === activeMode ? ACTIVE : (GREYS[i] ?? GREYS.at(-1)!),
-    }))
     const modeRow = (
       <Text wrap="truncate-end">
         {segments.flatMap((seg, i) => [

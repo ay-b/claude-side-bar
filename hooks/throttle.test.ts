@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { callLabel, footerHint, transcriptLines, heatColors, inkOn, lift, modeOf, overlay, weekColors, shellStatus, shortPercent, shortTokens, tailOf } from './register'
+import { callLabel, footerHint, transcriptLines, weekSvg, heatColors, inkOn, lift, modeOf, overlay, weekColors, shellStatus, shortPercent, shortTokens, tailOf } from './register'
 
 const measure = (percentUsed: number) => ({
   context: { window: 200_000 },
@@ -274,17 +274,18 @@ test('a second press cancels the queued compaction', async ($, on) => {
   expect(compacted).toBe(0)
 })
 
-test('Cmpct now is a rounded button one lift above the bar beneath it, reddish once filled', async ($, on) => {
+test('Cmpct now is a rounded pill one lift above the bar beneath it, reddish once filled', async ($, on) => {
   mock.clock(on, { now: 1_000_000 })
   mock.store(on)
   on('session.measure', ($, e) => ({ changed: e.changed }))
-  type Cell = { children?: unknown[]; props?: { color?: string; backgroundColor?: string } }
+  type Cell = { children?: unknown[]; props?: { color?: string; backgroundColor?: string }; hover?: { color?: string } }
   const button = async () => {
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    const found = await ui.find({ key: 'compact' })
+    const pill = await ui.find({ key: 'compact-pill' })
+    const body = await ui.find({ type: 'Button', key: 'compact' })
     await ui.unmount()
-    const cells = (found?.children ?? []) as Cell[]
-    return { left: cells[0], inner: cells.slice(1, -1), right: cells.at(-1) }
+    const [left, , right] = (pill?.children ?? []) as Cell[]
+    return { left, inner: (body?.children ?? []) as Cell[], right }
   }
 
   expect(lift('#303030')).toBe('#4a4a4a')
@@ -296,14 +297,20 @@ test('Cmpct now is a rounded button one lift above the bar beneath it, reddish o
   expect(empty.right?.children).toEqual(['\ue0b4'])
   expect(empty.left?.props).toMatchObject({ color: '#4a4a4a', backgroundColor: '#303030' })
   expect(empty.inner.map(c => c.props?.backgroundColor)).toEqual(Array(11).fill('#4a4a4a'))
+  // The pointer inverts the Button's body to its ink; the caps, outside it, turn that ink on hover.
+  expect(empty.inner.map(c => c.props?.color)).toEqual(Array(11).fill('#d0d0d0'))
+  expect(empty.left?.hover).toEqual({ color: '#d0d0d0' })
+  expect(empty.right?.hover).toEqual({ color: '#d0d0d0' })
 
   await $.session.measure({ ...usageAt(99), changed: ['context'] })
   const full = await button()
   // The pane is 40 cells wide: the button covers cells 27 to 39, all filled at 99%.
   const heat = heatColors(40, 40, 1_000_000)
   expect(full.left?.props).toMatchObject({ color: lift(heat[27]!), backgroundColor: heat[27] })
+  expect(full.left?.hover).toEqual({ color: 'black' })
   expect(full.inner.map(c => c.props?.backgroundColor)).toEqual(heat.slice(28, 39).map(lift))
   expect(full.right?.props).toMatchObject({ color: lift(heat[39]!), backgroundColor: heat[39] })
+  expect(full.right?.hover).toEqual({ color: 'black' })
   expect(heat[39]).toBe('#ff0000')
 })
 
@@ -321,7 +328,12 @@ test('the chevron pill expands a shell section to the pane height and collapses 
   const divider = await ui.find({ type: 'Text', text: /^─\ue0d7 Shell \ue0b0─+$/ })
   expect(divider?.text).toHaveLength(35)
   const pill = await ui.find({ type: 'Button', key: 'expand:fg:a' })
-  expect(pill?.text).toBe('  ')
+  expect(pill?.text).toBe(' \uf078 ')
+  type Cell = { children?: unknown[]; hover?: { color?: string } }
+  const [capL, , capR] = ((await ui.find({ key: 'pill:fg:a' }))?.children ?? []) as Cell[]
+  expect(capL?.children).toEqual(['\ue0b6'])
+  expect(capR?.children).toEqual(['\ue0b4'])
+  expect(capL?.hover).toEqual({ color: '#d0d0d0' })
   const [, tail, title, arrow] = (divider?.children ?? []) as { props?: Record<string, unknown> }[]
   expect(title?.props).toMatchObject({ bold: true, backgroundColor: '#444444' })
   expect(tail?.props).toMatchObject({ color: '#444444' })
@@ -335,7 +347,7 @@ test('the chevron pill expands a shell section to the pane height and collapses 
   expect(shown.at(-1)?.text).toBe('line 60')
   expect(shown[0]?.text).toBe('line 33')
   expect(await ui.find({ type: 'Text', text: /Session cost/ })).toBeUndefined()
-  expect((await ui.find({ type: 'Button', key: 'expand:fg:a' }))?.text).toBe('  ')
+  expect((await ui.find({ type: 'Button', key: 'expand:fg:a' }))?.text).toBe(' \uf077 ')
 
   await ui.press({ key: 'expand:fg:a' })
   expect(await ui.find({ type: 'Text', text: /^line 59$/ })).toBeUndefined()
@@ -350,7 +362,7 @@ test('an agent section names its type once, in the divider', async ($, on) => {
     value: [
       { id: 'a1', type: 'system-architect', name: 'system-architect', description: 'Design invitations', status: 'running' },
     ],
-  }))
+  }) as never)
   on('session.messages', () => ({ value: [] }))
   on('tool.call', () => ({ result: {} }))
   await $.tool.call({ tool: 'Agent', tool_use_id: 'x', prompt: 'p', description: 'd' } as never)
@@ -367,7 +379,7 @@ test('an agent section names its type once, in the divider', async ($, on) => {
 test('an expanded agent shows its console: calls and their output, not only the last text', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   mock.store(on)
-  on('agent.list', () => ({ value: [{ id: 'a1', type: 'Explore', name: 'Explore', description: 'Find it', status: 'running' }] }))
+  on('agent.list', () => ({ value: [{ id: 'a1', type: 'Explore', name: 'Explore', description: 'Find it', status: 'running' }] }) as never)
   on('session.messages', () => ({
     value: [
       { role: 'assistant', text: 'Searching.', toolUses: [{ tool_use_id: 'u', tool: 'Bash', input: { command: 'grep -rn foo' }, text: 'a.go:1: foo' }] },
@@ -525,4 +537,153 @@ test('transcriptLines shows text, each call, and a capped head of its result', (
 test('transcriptLines keeps only the newest rows', () => {
   const rows = transcriptLines([{ role: 'assistant', text: 'a\nb\nc', toolUses: [] }], 2)
   expect(rows).toBe('b\nc')
+})
+
+
+test('a subagent logs each call in its console as it starts and as it returns, never as a Shell row', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  const agent = { id: 'a1', type: 'Explore', name: 'Explore', description: 'Find it', status: 'running', label: 'Find it' }
+  on('agent.list', () => ({ value: [agent] }) as never)
+  on('session.messages', () => ({ value: [] }))
+  let release: () => void = () => {}
+  const gate = new Promise<void>(resolve => (release = resolve))
+  on('tool.call', async ($, e) => {
+    if (e.tool === 'Bash') await gate
+    return { result: { stdout: 'a.go:1: foo\na.go:2: foo', stderr: '' } } as never
+  })
+  await $.tool.call({ tool: 'Agent', tool_use_id: 'x', prompt: 'p', description: 'd' } as never)
+  const call = $.tool.call({ tool: 'Bash', tool_use_id: 'b', command: 'grep -rn foo', agentId: 'a1' } as never)
+  await clock.advance(3_000)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^● Bash\(grep -rn foo\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'expand:fg:b' })).toBeUndefined()
+
+  release()
+  await call
+  await clock.advance(3_000)
+  await ui.press({ key: 'expand:a1' })
+  const rows = (await ui.findAll({ type: 'Text' })).map(found => found.text)
+  expect(rows.slice(-3)).toEqual(['● Bash(grep -rn foo)', '  ⎿ a.go:1: foo', '    a.go:2: foo'])
+  await ui.unmount()
+})
+
+test('a collapsed agent shows the engine progress summary over its current call', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('agent.list', () => ({
+    value: [{ id: 'a1', type: 'Explore', name: 'Explore', description: 'Find it', status: 'running', label: 'Reading the config loader' }],
+  }) as never)
+  on('session.messages', () => ({ value: [] }))
+  on('tool.call', () => ({ result: 'body' }) as never)
+  await $.tool.call({ tool: 'Read', tool_use_id: 'r', file_path: '/a.go', agentId: 'a1' } as never)
+  await $.tool.call({ tool: 'Agent', tool_use_id: 'x', prompt: 'p', description: 'd' } as never)
+  await clock.advance(3_000)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^Reading the config loader$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^● Read\(\/a\.go\)$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('an agent whose transcript is refused says why instead of drawing nothing', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('agent.list', () => ({ value: [{ id: 'a1', type: 'Explore', name: 'Explore', description: 'Find it', status: 'running' }] }) as never)
+  on('session.messages', () => ({ value: { deny: 'filed under a workflow run' } }) as never)
+  on('tool.call', () => ({ result: {} }))
+  await $.tool.call({ tool: 'Agent', tool_use_id: 'x', prompt: 'p', description: 'd' } as never)
+  await clock.advance(3_000)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^transcript unavailable: filed under a workflow run$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a foreground shell whose call throws ends as interrupted', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('agent.list', () => ({ value: [] }))
+  on('tool.call', () => {
+    throw new Error('aborted')
+  })
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'a', command: 'sleep 9', description: 'nap' } as never).catch(() => {})
+  expect(await drawn($, /^\[interrupted\] nap$/)).toBeDefined()
+})
+
+test('the main loop stop ends foreground rows and background shells the engine no longer runs', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('agent.list', () => ({ value: [] }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'still going', stderr: '' } }) as never)
+  on('classic.Stop', () => ({}))
+  on('tool.call', ($, e) =>
+    ({ result: { backgroundTaskId: (e as { tool_use_id: string }).tool_use_id, backgroundOutputPath: '/tmp/x.output' } }) as never,
+  )
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'gone', command: 'make a', description: 'gone' } as never)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'kept', command: 'make b', description: 'kept' } as never)
+
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [{ id: 'kept', type: 'shell', status: 'running', description: 'kept' }] })
+  expect(await drawn($, /^\[ended\] gone$/)).toBeDefined()
+  expect(await drawn($, /^\[running\] kept$/)).toBeDefined()
+})
+
+test('a background shell whose output file stays gone is lost after three polls', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('agent.list', () => ({ value: [] }))
+  on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: 'No such file' } }) as never)
+  on('tool.call', () => ({ result: { backgroundTaskId: 't', backgroundOutputPath: '/tmp/t.output' } }) as never)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'b', command: 'serve', description: 'server' } as never)
+  await clock.advance(6_000)
+  expect(await drawn($, /^\[running\] server$/)).toBeDefined()
+  await clock.advance(3_000)
+  expect(await drawn($, /^\[lost\] server$/)).toBeDefined()
+  await clock.advance(12_000)
+  expect(await drawn($, /server/)).toBeUndefined()
+})
+
+test('a foreground row older than any Bash timeout is lost', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('agent.list', () => ({ value: [] }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }) as never)
+  on('tool.call', () => new Promise(() => {}) as never)
+  void $.tool.call({ tool: 'Bash', tool_use_id: 'h', command: 'hang', description: 'hang' } as never)
+  await clock.advance(3_000)
+  expect(await drawn($, /^\[running\] hang$/)).toBeDefined()
+  await clock.advance(11 * 60_000)
+  expect(await drawn($, /^\[lost\] hang$/)).toBeDefined()
+})
+
+test('the desktop draws native controls: a Progress, an Svg weekly bar, plain-word buttons, no Nerd Font glyphs', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('session.measure', ($, e) => ({ changed: e.changed }))
+  on('agent.list', () => ({ value: [] }))
+  on('tool.call', () => ({ result: { stdout: 'built\nok', stderr: '' } }))
+  await $.session.measure(measure(40))
+  await $.session.measure({ ...usageAt(50), changed: ['context'] })
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'a', command: 'make', description: 'build' } as never)
+  await clock.advance(1_000)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // The kit draws a Progress as the surface lowers it: its label and figure, then a track and its fill.
+  expect(await ui.find({ type: 'Text', text: /^Context 50% · 500k\/1m$/ })).toBeDefined()
+  expect((await ui.find({ type: 'Svg' }))?.props.alt).toMatch(/Week: 40%/)
+  expect((await ui.find({ type: 'Button', key: 'compact' }))?.props).toMatchObject({ label: 'Cmpct now' })
+  expect((await ui.find({ type: 'Button', key: 'expand:fg:a' }))?.props).toMatchObject({ label: 'Expand' })
+  const texts = (await ui.findAll({ type: 'Text' })).map(found => found.text).join('\n')
+  expect(/[-]/.test(texts)).toBe(false)
+
+  await ui.press({ key: 'expand:fg:a' })
+  expect((await ui.find({ type: 'Code' }))?.props.source).toBe('built\nok')
+  await ui.unmount()
+})
+
+test('the desktop weekly bar fills earlier use in blue and this session in yellow', () => {
+  const svg = weekSvg(60, 10)
+  expect(svg).toContain('<rect width="50" height="6" fill="url(#w)"/>')
+  expect(svg).toContain('<rect x="50" width="10" height="6" fill="#f5c400"/>')
 })
