@@ -30,7 +30,7 @@ const COMPACT_RETRY_MS = 2_000
 // Label ink on the grey track; also what a hovered pill's caps turn, as its body inverts to it.
 const LIGHT_INK = '#d0d0d0'
 const GOOD_END = new Set(['done', 'completed'])
-const QUIET_END = new Set(['ended', 'lost'])
+const QUIET_END = new Set(['ended', 'lost', 'interrupted'])
 const WEEK_YELLOW = '#f5c400'
 const COMPACT_TRIES = 5
 
@@ -76,12 +76,23 @@ export const consoleOf = (messages: Pick<SessionMessage, 'role' | 'text' | 'tool
   const rows: ConsoleRow[] = []
   for (const message of messages) {
     if (message.role !== 'assistant') continue
-    if (message.text) rows.push({ kind: 'text', text: message.text })
+    if (message.text) rows.push({ kind: 'text', text: tailOf(message.text, TEXT_LINES) })
     for (const use of message.toolUses) {
-      rows.push({ kind: 'call', id: use.tool_use_id, tool: use.tool, label: callLabel(use.input), result: use.text })
+      const head = use.text === undefined ? {} : resultHead(use.text)
+      rows.push({ kind: 'call', id: use.tool_use_id, tool: use.tool, label: callLabel(use.input), ...head })
     }
   }
   return rows
+}
+
+const TEXT_LINES = 40
+
+/** A result as a console keeps it: its first lines, and how many more it had. */
+export const resultHead = (text: string): { result: string; more?: number } => {
+  const lines = tailOf(text, Infinity).split('\n')
+  return lines.length > RESULT_LINES
+    ? { result: lines.slice(0, RESULT_LINES).join('\n'), more: lines.length - RESULT_LINES }
+    : { result: lines.join('\n') }
 }
 
 const callHead = (row: Extract<ConsoleRow, { kind: 'call' }>) => `${row.isError ? '✗' : '●'} ${row.tool}(${row.label})`
@@ -98,7 +109,8 @@ export const consoleText = (rows: ConsoleRow[], lines = EXPANDED_LINES): string 
     out.push(callHead(row))
     const result = row.result === undefined ? ['running…'] : tailOf(row.result, Infinity).split('\n')
     const shown = result[0] ? result.slice(0, RESULT_LINES) : ['(no output)']
-    if (result.length > RESULT_LINES) shown.push(`… +${result.length - RESULT_LINES} lines`)
+    const more = (row.more ?? 0) + Math.max(0, result.length - RESULT_LINES)
+    if (more > 0) shown.push(`… +${more} lines`)
     shown.forEach((line, i) => out.push(`${i === 0 ? '  ⎿ ' : '    '}${line}`))
   }
   return out.slice(-lines).join('\n')
@@ -385,7 +397,7 @@ async function readAgents($: EngineInterface, now: number): Promise<{ rows: Task
       let note: string | undefined
       // The panel's events fill the console; an agent it saw none of is read from its transcript.
       if (console.length === 0 && (isLive || before?.isLive !== false)) {
-        const got = await backfill($, agent.id)
+        const got = await backfill($, agent.id).catch(() => ({ note: 'transcript unavailable' }))
         if ('rows' in got) {
           console = got.rows
           if (console.length > 0) filled[agent.id] = console.slice(-CONSOLE_ROWS)
@@ -459,8 +471,11 @@ async function tick($: EngineInterface) {
   isTicking = true
   try {
     const now = await $.clock.now()
-    const { rows: nextAgents, ids } = await readAgents($, now)
-    await update($, agents, () => nextAgents)
+    // A failed agent read skips the agents this tick, never the shells' cleanup below.
+    const got = await readAgents($, now).catch(() => undefined)
+    const nextAgents = got?.rows ?? (await read($, agents))
+    const ids = got?.ids ?? new Set(nextAgents.map(agent => agent.id))
+    if (got) await update($, agents, () => nextAgents)
     await update($, agentMeta, meta => {
       const next = pruned(meta, ids)
       for (const agent of nextAgents) {
@@ -481,12 +496,12 @@ async function tick($: EngineInterface) {
     let current = await read($, shells)
     const unlinked = current.filter(s => s.isLive && s.id.startsWith('fg:') && !s.outputPath)
     if (unlinked.length > 0) {
-      const links = await linkForegroundShells($, unlinked)
+      const links = await linkForegroundShells($, unlinked).catch(() => new Map<string, string>())
       current = current.map(s => (links.has(s.id) ? { ...s, outputPath: links.get(s.id) } : s))
     }
     const refreshed = await Promise.all(
       current.map(shell =>
-        shell.isLive && (shell.outputPath || shell.id.startsWith('bg:')) ? readShell($, shell) : shell,
+        shell.isLive && (shell.outputPath || shell.id.startsWith('bg:')) ? readShell($, shell).catch(() => shell) : shell,
       ),
     )
     // A shell that ended while this tick read it keeps its final state.
@@ -504,21 +519,34 @@ async function tick($: EngineInterface) {
 }
 
 /** Ends every background shell the engine no longer counts as in flight; at the main loop's stop, every foreground one too. */
-async function reconcile($: EngineInterface, inFlight: readonly { id: string; type: string; command?: string }[], isMainStop: boolean) {
+async function reconcile(
+  $: EngineInterface,
+  inFlight: readonly { id: string; type: string; command?: string; description?: string }[],
+  isMainStop: boolean,
+  fgStatus = 'ended',
+  touchBackground = true,
+) {
   const now = await $.clock.now()
+  // By id first; by command or description too, should the engine's task id differ from the Bash result's.
   const running = (shell: Task) =>
-    inFlight.some(task => `bg:${task.id}` === shell.id || (task.type === 'shell' && task.command !== undefined && task.command === shell.command))
+    inFlight.some(
+      task =>
+        `bg:${task.id}` === shell.id ||
+        (task.type === 'shell' &&
+          ((task.command !== undefined && task.command === shell.command) ||
+            (task.description !== undefined && task.description === shell.title))),
+    )
   const list = await read($, shells)
-  const gone = list.filter(s => s.isLive && (s.id.startsWith('bg:') ? !running(s) : isMainStop))
+  const gone = list.filter(s => s.isLive && (s.id.startsWith('bg:') ? touchBackground && !running(s) : isMainStop))
   if (gone.length === 0) return
   // A last read picks up an exit trailer written since the previous poll.
-  const final = await Promise.all(gone.map(s => (s.id.startsWith('bg:') ? readShell($, s) : Promise.resolve(s))))
+  const final = await Promise.all(gone.map(s => (s.id.startsWith('bg:') ? readShell($, s).catch(() => s) : Promise.resolve(s))))
   await update($, shells, current =>
     settle(
       current.map(s => {
         const end = final.find(f => f.id === s.id)
         if (!end || !s.isLive) return s
-        return end.isLive ? { ...end, isLive: false, status: 'ended' } : end
+        return end.isLive ? { ...end, isLive: false, status: end.id.startsWith('fg:') ? fgStatus : 'ended' } : end
       }),
       now,
     ),
@@ -567,7 +595,13 @@ function startPolling($: EngineInterface) {
 }
 
 async function appendRow($: EngineInterface, agentId: string, row: ConsoleRow) {
-  await update($, consoles, byId => ({ ...byId, [agentId]: [...(byId[agentId] ?? []), row].slice(-CONSOLE_ROWS) }))
+  const kept: ConsoleRow = row.kind === 'text' ? { kind: 'text', text: tailOf(row.text, TEXT_LINES) } : row
+  await update($, consoles, byId => {
+    const rows = byId[agentId] ?? []
+    // A call a transcript backfill already brought in is not logged twice.
+    if (kept.kind === 'call' && rows.some(r => r.kind === 'call' && r.id === kept.id)) return byId
+    return { ...byId, [agentId]: [...rows, kept].slice(-CONSOLE_ROWS) }
+  })
 }
 
 /** Logs a subagent's tool call in its console as it starts, and its result as it returns. */
@@ -584,12 +618,12 @@ async function agentCall<R extends { deny?: string; text?: string; result?: unkn
     ran = await next(e as never)
     return ran
   } finally {
-    const result = resultText(ran)
+    const head = resultHead(resultText(ran))
     const isError = !ran || ran.deny !== undefined || ran.isError === true
     await update($, consoles, byId => ({
       ...byId,
       [agentId]: (byId[agentId] ?? []).map(row =>
-        row.kind === 'call' && row.id === e.tool_use_id ? { ...row, result, isError } : row,
+        row.kind === 'call' && row.id === e.tool_use_id ? { ...row, ...head, isError } : row,
       ),
     }))
   }
@@ -688,6 +722,8 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
     if (!e.agentId) {
+      // No foreground Bash outlives its main turn, an interrupted one included.
+      await reconcile($, [], true, e.isAborted ? 'interrupted' : 'ended', false)
       autoTimer?.cancel()
       autoTimer = $.clock.after(250, () => void autoCompact($, COMPACT_TRIES))
     }

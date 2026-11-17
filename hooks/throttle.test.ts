@@ -687,3 +687,52 @@ test('the desktop weekly bar fills earlier use in blue and this session in yello
   expect(svg).toContain('<rect width="50" height="6" fill="url(#w)"/>')
   expect(svg).toContain('<rect x="50" width="10" height="6" fill="#f5c400"/>')
 })
+
+test('an interrupted main turn ends its foreground rows at once', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('agent.list', () => ({ value: [] }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }) as never)
+  on('session.usage', () => ({ value: usageAt(10) }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('tool.call', () => new Promise(() => {}) as never)
+  void $.tool.call({ tool: 'Bash', tool_use_id: 'h', command: 'hang', description: 'hang' } as never)
+  await clock.advance(1)
+  expect(await drawn($, /^\[running\] hang$/)).toBeDefined()
+  await $.turn.complete({ ...turnEnd(), isAborted: true, reason: 'aborted' as never })
+  expect(await drawn($, /^\[interrupted\] hang$/)).toBeDefined()
+})
+
+test('a failing agent read does not hold back shell cleanup', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('agent.list', () => {
+    throw new Error('engine busy')
+  })
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'x\n[exited with code 0]', stderr: '' } }) as never)
+  on('tool.call', () => ({ result: { backgroundTaskId: 't', backgroundOutputPath: '/tmp/t.output' } }) as never)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'b', command: 'make', description: 'build' } as never)
+  await clock.advance(3_000)
+  expect(await drawn($, /^\[done\] build$/)).toBeDefined()
+})
+
+test('a call a backfill already brought in is logged once, its result kept as a head', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('agent.list', () => ({ value: [{ id: 'a1', type: 'Explore', name: 'Explore', description: 'Find it', status: 'running' }] }) as never)
+  on('session.messages', () => ({
+    value: [{ role: 'assistant', text: '', toolUses: [{ tool_use_id: 'u1', tool: 'Grep', input: { pattern: 'foo' } }] }],
+  }))
+  on('tool.call', () => ({ result: Array.from({ length: 30 }, (_, i) => `hit ${i}`).join('\n') }) as never)
+  await $.tool.call({ tool: 'Agent', tool_use_id: 'x', prompt: 'p', description: 'd' } as never)
+  await clock.advance(3_000)
+  await $.tool.call({ tool: 'Grep', tool_use_id: 'u1', pattern: 'foo', agentId: 'a1' } as never)
+  await clock.advance(3_000)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'expand:a1' })
+  const rows = (await ui.findAll({ type: 'Text' })).map(found => found.text)
+  expect(rows.filter(row => row.startsWith('● Grep'))).toHaveLength(1)
+  expect(rows.slice(-2)).toEqual(['    hit 3', '    … +26 lines'])
+  await ui.unmount()
+})

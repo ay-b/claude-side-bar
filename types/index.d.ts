@@ -20,7 +20,7 @@ export type Task = {
 /** One row of an agent's console: a stretch of its text, or a tool call and the head of its result. */
 export type ConsoleRow =
   | { kind: 'text'; text: string }
-  | { kind: 'call'; id: string; tool: string; label: string; result?: string; isError?: boolean }
+  | { kind: 'call'; id: string; tool: string; label: string; result?: string; more?: number; isError?: boolean }
 
 declare module 'claude-code' {
   interface PluginState {
