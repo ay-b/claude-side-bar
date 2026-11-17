@@ -736,3 +736,27 @@ test('a call a backfill already brought in is logged once, its result kept as a 
   expect(rows.slice(-2)).toEqual(['    hit 3', '    … +26 lines'])
   await ui.unmount()
 })
+
+test('Clear beside the modes drops every shell row and every ended agent', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('agent.list', () => ({ value: [] }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'going', stderr: '' } }) as never)
+  on('tool.call', () => ({ result: { backgroundTaskId: 't', backgroundOutputPath: '/tmp/t.output' } }) as never)
+  const empty = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await empty.find({ type: 'Button', key: 'clear' })).toBeUndefined()
+  await empty.unmount()
+
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'b', command: 'serve', description: 'stuck server' } as never)
+  await clock.advance(3_000)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await ui.find({ type: 'Button', key: 'clear' })).toBeDefined()
+    await ui.unmount()
+  }
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'clear' })
+  expect(await ui.find({ type: 'Text', text: /stuck server/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'clear' })).toBeUndefined()
+  await ui.unmount()
+})

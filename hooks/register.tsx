@@ -590,6 +590,13 @@ async function autoCompact($: EngineInterface, triesLeft: number) {
   }
 }
 
+/** The person's reset: drops every shell row and every agent row the engine no longer runs. */
+async function clearRows($: EngineInterface) {
+  await update($, shells, () => [])
+  await update($, agents, list => list.filter(agent => agent.isLive))
+  await update($, expanded, () => null)
+}
+
 function startPolling($: EngineInterface) {
   poll ??= $.clock.every(POLL_MS, () => void tick($))
 }
@@ -927,7 +934,10 @@ export const register: Register = on => {
       if (open) return <Box flexDirection="column">{section(open.kind, open.task, true)}</Box>
       return (
         <Box flexDirection="column" gap={1}>
-          {modes}
+          <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+            {modes}
+            {tasks.length > 0 && <Button key="clear" label="Clear" variant="secondary" onPress={() => clearRows($)} />}
+          </Box>
           {weekBlock}
           {contextBlock}
           {tasks.map(({ kind, task }) => section(kind, task, false))}
@@ -1061,7 +1071,14 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column">
-        {modeRow}
+        <Box flexDirection="row" justifyContent="space-between">
+          {modeRow}
+          {tasks.length > 0 && (
+            <Button key="clear" label="Clear" plain dimColor onPress={() => clearRows($)}>
+              Clear
+            </Button>
+          )}
+        </Box>
         <Text bold>Session cost</Text>
         {weekSection()}
         {contextSection()}
